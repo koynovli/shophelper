@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
@@ -155,10 +156,12 @@ class Company(models.Model):
     name = models.CharField(
         max_length=255,
         verbose_name="Название",
+        help_text="Наименование организации (тенанта / юрлица).",
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name="Создана",
+        help_text="Дата и время создания записи в системе.",
     )
 
     class Meta:
@@ -180,26 +183,40 @@ class Inventory(models.Model):
         on_delete=models.CASCADE,
         related_name="inventories",
         verbose_name="Магазин",
+        help_text="Торговая точка, где отражаются остатки.",
     )
     product = models.ForeignKey(
         Product,
         on_delete=models.CASCADE,
         related_name="inventories",
         verbose_name="Товар",
+        help_text="Товарный SKU.",
+    )
+    batch = models.ForeignKey(
+        "ProductBatch",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inventory_lines",
+        verbose_name="Партия",
+        help_text="Партия, из которой образован этот остаток (FEFO/FIFO, полка/склад).",
     )
     quantity = models.PositiveIntegerField(
         default=0,
         verbose_name="Количество",
+        help_text="Количество единиц товара по данной записи.",
     )
     status = models.CharField(
         max_length=20,
         choices=LocationStatus.choices,
         default=LocationStatus.WAREHOUSE,
         verbose_name="Статус нахождения",
+        help_text="Где физически учитывается товар: заказ, склад или витрина.",
     )
     updated_at = models.DateTimeField(
         auto_now=True,
         verbose_name="Обновлено",
+        help_text="Время последнего изменения записи.",
     )
 
     class Meta:
@@ -208,12 +225,19 @@ class Inventory(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["store", "product"],
-                name="uniq_inventory_store_product",
-            )
+                condition=models.Q(batch__isnull=True),
+                name="uniq_inventory_store_product_no_batch",
+            ),
+            models.UniqueConstraint(
+                fields=["store", "product", "batch"],
+                condition=models.Q(batch__isnull=False),
+                name="uniq_inventory_store_product_batch",
+            ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.store} — {self.product} ({self.quantity})"
+        batch_hint = f", партия {self.batch_id}" if self.batch_id else ""
+        return f"{self.store} — {self.product} ({self.quantity}{batch_hint})"
 
 
 class SupplyOrder(models.Model):
@@ -228,27 +252,39 @@ class SupplyOrder(models.Model):
         on_delete=models.CASCADE,
         related_name="supply_orders",
         verbose_name="Организация",
+        help_text="Организация-заказчик поставки.",
     )
     store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
         related_name="supply_orders",
         verbose_name="Магазин",
+        help_text="Магазин назначения: куда везут товар.",
     )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
         default=Status.DRAFT,
         verbose_name="Статус",
+        help_text="Этап жизненного цикла заказа поставщику.",
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name="Создан",
+        help_text="Дата и время создания заказа.",
     )
     received_at = models.DateTimeField(
         null=True,
         blank=True,
         verbose_name="Принят",
+        help_text="Время фактической приёмки по складу/магазину.",
+    )
+    total_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        verbose_name="Сумма закупки",
+        help_text="Итоговая сумма заказа (валюта проекта; может совпадать с суммой позиций).",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -257,6 +293,7 @@ class SupplyOrder(models.Model):
         blank=True,
         related_name="created_supply_orders",
         verbose_name="Кем создан",
+        help_text="Пользователь, оформивший заказ.",
     )
 
     class Meta:
@@ -280,19 +317,24 @@ class SupplyOrderItem(models.Model):
         on_delete=models.CASCADE,
         related_name="items",
         verbose_name="Заказ",
+        help_text="Заказ поставщику, к которому относится строка.",
     )
     product = models.ForeignKey(
         Product,
         on_delete=models.CASCADE,
         related_name="supply_order_items",
         verbose_name="Товар",
+        help_text="Товар в строке заказа.",
     )
-    expected_quantity = models.PositiveIntegerField(
-        verbose_name="Ожидаемое количество",
+    quantity = models.PositiveIntegerField(
+        verbose_name="Количество",
+        help_text="Заказанное количество единиц по строке.",
     )
-    actual_quantity = models.PositiveIntegerField(
-        default=0,
-        verbose_name="Фактическое количество",
+    price_per_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name="Цена за единицу",
+        help_text="Договорная закупочная цена за единицу в этой строке.",
     )
 
     class Meta:
@@ -300,7 +342,97 @@ class SupplyOrderItem(models.Model):
         verbose_name_plural = "Позиции заказов"
 
     def __str__(self) -> str:
-        return f"{self.product} × {self.expected_quantity} (заказ {self.order_id})"
+        return f"{self.product} × {self.quantity} (заказ {self.order_id})"
+
+
+class ProductBatch(models.Model):
+    """Партия товара с партионным учётом и сроком годности (FEFO)."""
+
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="batches",
+        verbose_name="Товар",
+        help_text="Номенклатура в партии.",
+    )
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="product_batches",
+        verbose_name="Магазин",
+        help_text="Точка, где учитывается остаток партии.",
+    )
+    supply_item = models.ForeignKey(
+        SupplyOrderItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="batches",
+        verbose_name="Позиция заказа поставки",
+        help_text="Строка заказа поставщику, по которой оприходована партия (если применимо).",
+    )
+    purchase_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name="Закупочная цена",
+        help_text="Себестоимость единицы в рамках этой партии.",
+    )
+    initial_quantity = models.PositiveIntegerField(
+        verbose_name="Начальное количество",
+        help_text="Количество при первичной приёмке в партию.",
+    )
+    current_quantity = models.PositiveIntegerField(
+        verbose_name="Текущее количество в партии",
+        help_text="Остаток по партии с учётом списаний и перемещений.",
+    )
+    manufacture_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="Дата производства",
+        help_text="Дата выпуска (если есть на маркировке).",
+    )
+    expiration_date = models.DateField(
+        verbose_name="Срок годности",
+        help_text="Крайняя дата годности; обязательна для контроля FEFO.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Активна",
+        help_text="Неактивные партии исключаются из подбора под новые операции.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создана",
+        help_text="Запись партии в системе.",
+    )
+
+    class Meta:
+        verbose_name = "Партия товара"
+        verbose_name_plural = "Партии товаров"
+        ordering = ("expiration_date", "pk")
+
+    def __str__(self) -> str:
+        return f"{self.product.sku} @ {self.store} → до {self.expiration_date}"
+
+    def get_remaining_days(self) -> int:
+        """Возвращает число дней до окончания срока годности (отрицательное — просрочка)."""
+        today = timezone.localdate()
+        return (self.expiration_date - today).days
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expiration_date < timezone.localdate()
+
+    def deduct_quantity(self, amount: int) -> None:
+        """Уменьшает остаток партии; при нуле помечает партию неактивной."""
+        if amount < 1:
+            raise ValueError("Количество для списания должно быть не меньше 1.")
+        if amount > self.current_quantity:
+            raise ValueError("Нельзя списать больше, чем текущий остаток партии.")
+        self.current_quantity -= amount
+        if self.current_quantity == 0:
+            self.is_active = False
+        self.save(update_fields=["current_quantity", "is_active"])
 
 
 class Equipment(models.Model):
