@@ -1,7 +1,9 @@
 import math
 
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 
 class Store(models.Model):
@@ -147,6 +149,158 @@ class Product(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} ({self.sku})"
+
+
+class Company(models.Model):
+    name = models.CharField(
+        max_length=255,
+        verbose_name="Название",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создана",
+    )
+
+    class Meta:
+        verbose_name = "Организация"
+        verbose_name_plural = "Организации"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Inventory(models.Model):
+    class LocationStatus(models.TextChoices):
+        ORDERED = "ordered", "Заказано"
+        WAREHOUSE = "warehouse", "На складе"
+        SHELF = "shelf", "На витрине"
+
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="inventories",
+        verbose_name="Магазин",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="inventories",
+        verbose_name="Товар",
+    )
+    quantity = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=LocationStatus.choices,
+        default=LocationStatus.WAREHOUSE,
+        verbose_name="Статус нахождения",
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Обновлено",
+    )
+
+    class Meta:
+        verbose_name = "Остаток"
+        verbose_name_plural = "Остатки"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["store", "product"],
+                name="uniq_inventory_store_product",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.store} — {self.product} ({self.quantity})"
+
+
+class SupplyOrder(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        ORDERED = "ordered", "В пути"
+        RECEIVED = "received", "Принят"
+        CANCELLED = "cancelled", "Отменен"
+
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="supply_orders",
+        verbose_name="Организация",
+    )
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="supply_orders",
+        verbose_name="Магазин",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        verbose_name="Статус",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создан",
+    )
+    received_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Принят",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_supply_orders",
+        verbose_name="Кем создан",
+    )
+
+    class Meta:
+        verbose_name = "Заказ поставщику"
+        verbose_name_plural = "Заказы поставщикам"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"Заказ #{self.pk or '—'} — {self.store} ({self.get_status_display()})"
+
+    def mark_as_received(self) -> None:
+        # TODO: Логика создания ProductBatch и обновления Inventory будет в API-слое
+        self.status = self.Status.RECEIVED
+        self.received_at = timezone.now()
+        self.save(update_fields=["status", "received_at"])
+
+
+class SupplyOrderItem(models.Model):
+    order = models.ForeignKey(
+        SupplyOrder,
+        on_delete=models.CASCADE,
+        related_name="items",
+        verbose_name="Заказ",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="supply_order_items",
+        verbose_name="Товар",
+    )
+    expected_quantity = models.PositiveIntegerField(
+        verbose_name="Ожидаемое количество",
+    )
+    actual_quantity = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Фактическое количество",
+    )
+
+    class Meta:
+        verbose_name = "Позиция заказа"
+        verbose_name_plural = "Позиции заказов"
+
+    def __str__(self) -> str:
+        return f"{self.product} × {self.expected_quantity} (заказ {self.order_id})"
 
 
 class Equipment(models.Model):

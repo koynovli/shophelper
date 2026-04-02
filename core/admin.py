@@ -3,11 +3,15 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from .models import (
     Category,
+    Company,
     Equipment,
+    Inventory,
     Placement,
     Product,
     ShelfLevel,
     Store,
+    SupplyOrder,
+    SupplyOrderItem,
     Task,
     User,
 )
@@ -62,6 +66,35 @@ class ProductAdmin(admin.ModelAdmin):
     list_display = ("name", "sku", "category", "price")
     search_fields = ("sku", "name")
     list_filter = ("category",)
+
+
+class SupplyOrderItemInline(admin.TabularInline):
+    model = SupplyOrderItem
+    extra = 0
+    autocomplete_fields = ("product",)
+
+
+@admin.register(Company)
+class CompanyAdmin(admin.ModelAdmin):
+    list_display = ("name", "created_at")
+    search_fields = ("name",)
+
+
+@admin.register(SupplyOrder)
+class SupplyOrderAdmin(admin.ModelAdmin):
+    list_display = ("id", "company", "store", "status", "created_at", "received_at", "created_by")
+    list_filter = ("status", "company", "store")
+    search_fields = ("store__name", "company__name")
+    autocomplete_fields = ("company", "store", "created_by")
+    inlines = (SupplyOrderItemInline,)
+
+
+@admin.register(Inventory)
+class InventoryAdmin(admin.ModelAdmin):
+    list_display = ("store", "product", "quantity", "status", "updated_at")
+    list_filter = ("status", "store")
+    search_fields = ("product__sku", "product__name", "store__name")
+    autocomplete_fields = ("store", "product")
 
 
 @admin.register(Equipment)
