@@ -143,6 +143,11 @@ class Product(models.Model):
         verbose_name="Вес",
         help_text="Вес товара (единица измерения по договорённости, например граммы).",
     )
+    is_marked = models.BooleanField(
+        default=False,
+        verbose_name="Маркированный товар",
+        help_text="Товар с обязательной маркировкой (например, «Честный ЗНАК»).",
+    )
 
     class Meta:
         verbose_name = "Товар"
@@ -412,7 +417,7 @@ class ProductBatch(models.Model):
         ordering = ("expiration_date", "pk")
 
     def __str__(self) -> str:
-        return f"{self.product.sku} @ {self.store} → до {self.expiration_date}"
+        return f"{self.product.sku} @ {self.store} -> до {self.expiration_date}"
 
     def get_remaining_days(self) -> int:
         """Возвращает число дней до окончания срока годности (отрицательное — просрочка)."""
