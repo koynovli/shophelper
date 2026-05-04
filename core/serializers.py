@@ -1,6 +1,15 @@
 from rest_framework import serializers
 
-from .models import ProductBatch, Supplier, SupplyOrder, SupplyOrderItem
+from .models import (
+    Equipment,
+    Inventory,
+    ProductBatch,
+    Shelf,
+    Supplier,
+    SupplyOrder,
+    SupplyOrderItem,
+    Zone,
+)
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -37,3 +46,55 @@ class SupplyOrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupplyOrder
         fields = "__all__"
+
+
+class ShelfSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Shelf
+        fields = "__all__"
+
+
+class EquipmentSerializer(serializers.ModelSerializer):
+    shelves = ShelfSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Equipment
+        fields = "__all__"
+
+
+class ZoneSerializer(serializers.ModelSerializer):
+    equipment = EquipmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Zone
+        fields = ("id", "name", "store", "color", "equipment")
+
+
+class ShelfBriefSerializer(serializers.ModelSerializer):
+    """Краткое описание полки для вложения в остатки."""
+
+    class Meta:
+        model = Shelf
+        fields = ("id", "level", "width", "height", "depth")
+
+
+class RackBriefSerializer(serializers.ModelSerializer):
+    """Краткое описание стеллажа/оборудования плана зала."""
+
+    class Meta:
+        model = Equipment
+        fields = ("id", "name", "type", "pos_x", "pos_y")
+
+
+class InventorySerializer(serializers.ModelSerializer):
+    shelf_info = ShelfBriefSerializer(source="shelf", read_only=True, allow_null=True)
+    rack_info = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Inventory
+        fields = "__all__"
+
+    def get_rack_info(self, obj: Inventory):
+        if obj.shelf_id is None:
+            return None
+        return RackBriefSerializer(obj.shelf.equipment).data

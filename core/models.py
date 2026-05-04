@@ -633,6 +633,47 @@ class Shelf(models.Model):
     def __str__(self) -> str:
         return f"{self.equipment} — полка {self.level}"
 
+    def calculate_max_capacity(self, product: Product) -> int:
+        """
+        Оценка максимального числа целых единиц товара на полке (решётка по осям X/Y/Z).
+
+        Полка (Shelf) задаёт внутренние размеры в сантиметрах; товар (Product) — в
+        миллиметрах. Перед расчётом размеры полки переводятся в мм (×10), чтобы
+        сравнение с габаритами товара было в одной системе единиц.
+
+        Далее по каждой оси считается, сколько целых «кирпичей» помещается вдоль
+        ширины, глубины и высоты (целочисленное деление // — без дробных долей
+        единицы товара). Итоговая вместимость — произведение трёх множителей
+        (упрощённая модель укладки параллелепипедов без зазоров и без поворота SKU).
+
+        При неполных или нулевых габаритах товара возвращается 0.
+        """
+        if product is None:
+            return 0
+
+        pw, ph, pd = product.width, product.height, product.depth
+        if pw is None or ph is None or pd is None:
+            return 0
+        if pw <= 0 or ph <= 0 or pd <= 0:
+            return 0
+
+        sw, sh, sd = self.width, self.height, self.depth
+        if sw is None or sh is None or sd is None:
+            return 0
+        if sw <= 0 or sh <= 0 or sd <= 0:
+            return 0
+
+        # Полка: см → мм (Float); товар уже в мм.
+        sw_mm = sw * 10.0
+        sh_mm = sh * 10.0
+        sd_mm = sd * 10.0
+
+        nx = int(sw_mm // pw)
+        ny = int(sd_mm // pd)
+        nz = int(sh_mm // ph)
+
+        return nx * ny * nz
+
 
 class PlanogramEquipment(models.Model):
     """Оборудование планограммы (логика выкладки), не путать с Equipment плана зала."""

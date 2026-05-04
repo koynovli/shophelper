@@ -9,8 +9,15 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Inventory, ProductBatch, SupplyOrder, SupplyOrderItem
-from .serializers import ProductBatchSerializer, SupplyOrderSerializer
+from .models import Equipment, Inventory, ProductBatch, Shelf, SupplyOrder, SupplyOrderItem, Zone
+from .serializers import (
+    EquipmentSerializer,
+    InventorySerializer,
+    ProductBatchSerializer,
+    ShelfSerializer,
+    SupplyOrderSerializer,
+    ZoneSerializer,
+)
 
 
 class ProductBatchFilter(filters.FilterSet):
@@ -186,3 +193,103 @@ def _parse_expiration_date(raw):
     if isinstance(raw, str):
         return parse_date(raw)
     return None
+
+
+class ZoneFilter(filters.FilterSet):
+    class Meta:
+        model = Zone
+        fields = ("store",)
+
+
+class EquipmentFilter(filters.FilterSet):
+    zone_id = filters.NumberFilter(field_name="zone_id")
+
+    class Meta:
+        model = Equipment
+        fields = ("zone_id",)
+
+
+class ZoneViewSet(viewsets.ModelViewSet):
+    queryset = Zone.objects.select_related("store").prefetch_related(
+        "equipment__shelves",
+    )
+    serializer_class = ZoneSerializer
+    filterset_class = ZoneFilter
+
+
+class EquipmentViewSet(viewsets.ModelViewSet):
+    queryset = Equipment.objects.select_related("zone", "zone__store").prefetch_related(
+        "shelves",
+    )
+    serializer_class = EquipmentSerializer
+    filterset_class = EquipmentFilter
+
+
+class ShelfViewSet(viewsets.ModelViewSet):
+    queryset = Shelf.objects.select_related("equipment", "equipment__zone")
+    serializer_class = ShelfSerializer
+
+
+class InventoryViewSet(viewsets.ModelViewSet):
+    queryset = Inventory.objects.select_related(
+        "store",
+        "product",
+        "batch",
+        "shelf",
+        "shelf__equipment",
+    )
+    serializer_class = InventorySerializer
+
+    @action(detail=False, methods=["get"])
+    def shelf_fill_report(self, request):
+        """
+        Отчёт по заполненности полок.
+
+        Для каждой полки суммируется фактический остаток (Inventory.quantity).
+        Опорная «макс. вместимость» берётся как максимум из calculate_max_capacity
+        по строкам остатков на этой полке — это верхняя оценка числа мест под один
+        тип SKU в упрощённой 3D-решётке; при нескольких разных товарах показатель
+        ориентировочный (дипломная модель без учёта смешанной укладки).
+        """
+        shelves = Shelf.objects.select_related(
+            "equipment",
+            "equipment__zone",
+        ).order_by("equipment_id", "level")
+
+        report = []
+        for shelf in shelves:
+            inv_qs = Inventory.objects.filter(shelf=shelf).select_related("product")
+            current_total = sum(inv.quantity for inv in inv_qs)
+
+            caps_positive = []
+            for inv in inv_qs:
+                cap = shelf.calculate_max_capacity(inv.product)
+                if cap > 0:
+                    caps_positive.append(cap)
+
+            max_reference = max(caps_positive) if caps_positive else 0
+
+            if max_reference > 0:
+                fill_percent = min(
+                    100.0,
+                    round(current_total / max_reference * 100, 2),
+                )
+            else:
+                fill_percent = None
+
+            report.append(
+                {
+                    "shelf_id": shelf.pk,
+                    "level": shelf.level,
+                    "equipment_id": shelf.equipment_id,
+                    "equipment_name": shelf.equipment.name,
+                    "equipment_type": shelf.equipment.type,
+                    "zone_id": shelf.equipment.zone_id,
+                    "zone_name": shelf.equipment.zone.name,
+                    "current_quantity_total": current_total,
+                    "max_capacity_reference": max_reference,
+                    "fill_percent": fill_percent,
+                }
+            )
+
+        return Response(report, status=status.HTTP_200_OK)
