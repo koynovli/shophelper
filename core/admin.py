@@ -8,8 +8,10 @@ from .models import (
     Equipment,
     Inventory,
     Placement,
+    PlanogramEquipment,
     Product,
     ProductBatch,
+    Shelf,
     ShelfLevel,
     Store,
     Supplier,
@@ -17,6 +19,7 @@ from .models import (
     SupplyOrderItem,
     Task,
     User,
+    Zone,
 )
 
 
@@ -177,14 +180,45 @@ class ProductBatchAdmin(admin.ModelAdmin):
 
 @admin.register(Inventory)
 class InventoryAdmin(admin.ModelAdmin):
-    list_display = ("store", "product", "batch", "quantity", "status", "updated_at")
+    list_display = ("store", "product", "shelf", "batch", "quantity", "status", "updated_at")
     list_filter = ("status", "store")
     search_fields = ("product__sku", "product__name", "store__name")
-    autocomplete_fields = ("store", "product", "batch")
+    autocomplete_fields = ("store", "product", "batch", "shelf")
+
+
+@admin.register(Zone)
+class ZoneAdmin(admin.ModelAdmin):
+    list_display = ("name", "store", "color")
+    list_filter = ("store",)
+    search_fields = ("name", "store__name")
+    autocomplete_fields = ("store",)
+
+
+class ShelfInline(admin.TabularInline):
+    model = Shelf
+    extra = 0
+    fields = ("level", "width", "height", "depth", "capacity_notes")
 
 
 @admin.register(Equipment)
-class EquipmentAdmin(admin.ModelAdmin):
+class FloorEquipmentAdmin(admin.ModelAdmin):
+    list_display = ("name", "zone", "type", "pos_x", "pos_y", "orientation")
+    list_filter = ("type", "zone__store", "zone")
+    search_fields = ("name", "zone__name")
+    autocomplete_fields = ("zone",)
+    inlines = (ShelfInline,)
+
+
+@admin.register(Shelf)
+class ShelfAdmin(admin.ModelAdmin):
+    list_display = ("equipment", "level", "width", "height", "depth")
+    list_filter = ("equipment__zone__store", "equipment")
+    search_fields = ("equipment__name",)
+    autocomplete_fields = ("equipment",)
+
+
+@admin.register(PlanogramEquipment)
+class PlanogramEquipmentAdmin(admin.ModelAdmin):
     list_display = ("name", "store", "display_logic", "pos_x", "pos_y", "rotation")
     list_filter = ("store", "display_logic")
     search_fields = ("name",)

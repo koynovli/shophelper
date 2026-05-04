@@ -231,6 +231,15 @@ class Inventory(models.Model):
         verbose_name="Партия",
         help_text="Партия, из которой образован этот остаток (FEFO/FIFO, полка/склад).",
     )
+    shelf = models.ForeignKey(
+        "Shelf",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inventories",
+        verbose_name="Полка (план зала)",
+        help_text="Приоритетная привязка к полке цифрового двойника зала (если указана).",
+    )
     quantity = models.PositiveIntegerField(
         default=0,
         verbose_name="Количество",
@@ -241,7 +250,8 @@ class Inventory(models.Model):
         choices=LocationStatus.choices,
         default=LocationStatus.WAREHOUSE,
         verbose_name="Статус нахождения",
-        help_text="Где физически учитывается товар: заказ, склад или витрина.",
+        help_text="Где физически учитывается товар; при заполненной полке «shelf» "
+        "местоположение в первую очередь определяется по цифровому плану зала.",
     )
     updated_at = models.DateTimeField(
         auto_now=True,
@@ -496,7 +506,137 @@ class ProductBatch(models.Model):
         self.save(update_fields=["current_quantity", "is_active"])
 
 
+class Zone(models.Model):
+    name = models.CharField(
+        max_length=255,
+        verbose_name="Название",
+        help_text='Например: «Торговый зал», «Склад».',
+    )
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="zones",
+        verbose_name="Магазин",
+        help_text="Магазин, к которому относится зона на плане.",
+    )
+    color = models.CharField(
+        max_length=32,
+        verbose_name="Цвет на карте",
+        help_text="Цвет отображения зоны (например, HEX-код #RRGGBB).",
+    )
+
+    class Meta:
+        verbose_name = "Зона"
+        verbose_name_plural = "Зоны"
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.store})"
+
+
 class Equipment(models.Model):
+    """Оборудование на плане зала (цифровой двойник)."""
+
+    class EquipmentType(models.TextChoices):
+        SHELF = "shelf", "Стеллаж"
+        FRIDGE = "fridge", "Холодильник"
+        DISPLAY = "display", "Витрина"
+
+    name = models.CharField(
+        max_length=255,
+        verbose_name="Название",
+        help_text='Например: «Стеллаж №1».',
+    )
+    zone = models.ForeignKey(
+        Zone,
+        on_delete=models.CASCADE,
+        related_name="equipment",
+        verbose_name="Зона",
+        help_text="Зона торгового зала или склада, где стоит объект.",
+    )
+    type = models.CharField(
+        max_length=20,
+        choices=EquipmentType.choices,
+        default=EquipmentType.SHELF,
+        verbose_name="Тип",
+        help_text="Тип оборудования для отрисовки и логики.",
+    )
+    pos_x = models.FloatField(
+        verbose_name="Позиция X (центр)",
+        help_text="Координата X центра объекта на плане.",
+    )
+    pos_y = models.FloatField(
+        verbose_name="Позиция Y (центр)",
+        help_text="Координата Y центра объекта на плане.",
+    )
+    width = models.FloatField(
+        verbose_name="Ширина",
+        help_text="Ширина объекта на плане (условные единицы или см — по договорённости).",
+    )
+    height = models.FloatField(
+        verbose_name="Высота",
+        help_text="Высота объекта на плане (условные единицы или см — по договорённости).",
+    )
+    orientation = models.FloatField(
+        default=0.0,
+        verbose_name="Поворот (°)",
+        help_text="Угол поворота объекта на плане в градусах.",
+    )
+
+    class Meta:
+        verbose_name = "Оборудование (план зала)"
+        verbose_name_plural = "Оборудование (план зала)"
+
+    def __str__(self) -> str:
+        return f"{self.name} — {self.zone}"
+
+
+class Shelf(models.Model):
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.CASCADE,
+        related_name="shelves",
+        verbose_name="Оборудование",
+        help_text="Стеллаж/витрина/холодильник, к которому относится полка.",
+    )
+    level = models.PositiveIntegerField(
+        verbose_name="Номер полки",
+        help_text="Номер полки снизу вверх (1 — нижняя).",
+    )
+    width = models.FloatField(
+        verbose_name="Ширина (см)",
+        help_text="Внутренняя ширина полки в сантиметрах.",
+    )
+    height = models.FloatField(
+        verbose_name="Высота (см)",
+        help_text="Внутренняя высота полки в сантиметрах.",
+    )
+    depth = models.FloatField(
+        verbose_name="Глубина (см)",
+        help_text="Внутренняя глубина полки в сантиметрах.",
+    )
+    capacity_notes = models.TextField(
+        blank=True,
+        verbose_name="Примечания по вместимости",
+        help_text="Дополнительная информация о грузоподъёмности, шаге крючков и т.п.",
+    )
+
+    class Meta:
+        verbose_name = "Полка"
+        verbose_name_plural = "Полки"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["equipment", "level"],
+                name="uniq_shelf_equipment_level",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.equipment} — полка {self.level}"
+
+
+class PlanogramEquipment(models.Model):
+    """Оборудование планограммы (логика выкладки), не путать с Equipment плана зала."""
+
     class DisplayLogic(models.TextChoices):
         SURFACE = "surface", "Полка"
         LINEAR = "linear", "Вешалка"
@@ -512,7 +652,7 @@ class Equipment(models.Model):
     store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
-        related_name="equipment",
+        related_name="planogram_equipment",
         verbose_name="Магазин",
         help_text="Магазин, в котором установлено оборудование.",
     )
@@ -550,8 +690,8 @@ class Equipment(models.Model):
     )
 
     class Meta:
-        verbose_name = "Оборудование"
-        verbose_name_plural = "Оборудование"
+        verbose_name = "Оборудование (планограмма)"
+        verbose_name_plural = "Оборудование (планограмма)"
 
     def __str__(self) -> str:
         return f"{self.name} — {self.store}"
@@ -559,7 +699,7 @@ class Equipment(models.Model):
 
 class ShelfLevel(models.Model):
     equipment = models.ForeignKey(
-        Equipment,
+        PlanogramEquipment,
         on_delete=models.CASCADE,
         related_name="shelf_levels",
         verbose_name="Оборудование",
@@ -642,19 +782,19 @@ class Placement(models.Model):
 
         logic = equipment.display_logic
 
-        if logic == Equipment.DisplayLogic.SURFACE:
+        if logic == PlanogramEquipment.DisplayLogic.SURFACE:
             if not product.width or not product.depth:
                 return 0
             capacity = (shelf.width / product.width) * (shelf.depth / product.depth)
             return safe_floor(capacity)
 
-        if logic == Equipment.DisplayLogic.LINEAR:
+        if logic == PlanogramEquipment.DisplayLogic.LINEAR:
             if not product.depth:
                 return 0
             capacity = shelf.width / product.depth
             return safe_floor(capacity)
 
-        if logic == Equipment.DisplayLogic.BULK:
+        if logic == PlanogramEquipment.DisplayLogic.BULK:
             if not product.width or not product.height or not product.depth:
                 return 0
             shelf_volume = shelf.width * shelf.height * shelf.depth
@@ -664,10 +804,10 @@ class Placement(models.Model):
             capacity = shelf_volume / product_volume
             return safe_floor(capacity)
 
-        if logic == Equipment.DisplayLogic.GRID:
+        if logic == PlanogramEquipment.DisplayLogic.GRID:
             return max(0, int(shelf.hooks_count))
 
-        if logic == Equipment.DisplayLogic.SPOT:
+        if logic == PlanogramEquipment.DisplayLogic.SPOT:
             return 1
 
         return 0
