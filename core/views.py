@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
@@ -57,7 +58,9 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
     queryset = SupplyOrder.objects.prefetch_related("items").select_related(
         "company",
         "store",
+        "supplier",
         "created_by",
+        "received_by",
     )
     serializer_class = SupplyOrderSerializer
 
@@ -69,7 +72,8 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     "detail": "Ожидается непустой массив batches: "
-                    '[{"item_id": ..., "expiration_date": "YYYY-MM-DD"}, ...].'
+                    '[{"item_id": ..., "expiration_date": "YYYY-MM-DD", '
+                    '"actual_quantity": <опционально>}, ...].'
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -82,6 +86,8 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
                         {"detail": "Заказ уже принят."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+
+                total_cost = Decimal("0")
 
                 for entry in batches_payload:
                     if not isinstance(entry, dict):
@@ -109,13 +115,35 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
                             "к этому заказу."
                         ) from exc
 
+                    raw_actual = entry.get("actual_quantity", None)
+                    if raw_actual is None:
+                        actual_qty = item.quantity
+                    else:
+                        try:
+                            actual_qty = int(raw_actual)
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                "Поле actual_quantity должно быть целым числом."
+                            ) from exc
+                    if actual_qty < 0:
+                        raise ValueError("actual_quantity не может быть отрицательным.")
+
+                    item.actual_quantity = actual_qty
+                    item.save(update_fields=["actual_quantity"])
+
+                    line_cost = Decimal(actual_qty) * item.purchase_price
+                    total_cost += line_cost
+
+                    if actual_qty == 0:
+                        continue
+
                     batch = ProductBatch.objects.create(
                         product=item.product,
                         store=order.store,
                         supply_item=item,
-                        purchase_price=item.price_per_unit,
-                        initial_quantity=item.quantity,
-                        current_quantity=item.quantity,
+                        purchase_price=item.purchase_price,
+                        initial_quantity=actual_qty,
+                        current_quantity=actual_qty,
                         manufacture_date=None,
                         expiration_date=exp_date,
                         is_active=True,
@@ -125,14 +153,25 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
                         product=item.product,
                         batch=batch,
                         defaults={
-                            "quantity": item.quantity,
+                            "quantity": actual_qty,
                             "status": Inventory.LocationStatus.WAREHOUSE,
                         },
                     )
 
                 order.status = SupplyOrder.Status.RECEIVED
                 order.received_at = timezone.now()
-                order.save(update_fields=["status", "received_at"])
+                order.total_cost = total_cost
+                order.received_by = (
+                    request.user if request.user.is_authenticated else None
+                )
+                order.save(
+                    update_fields=[
+                        "status",
+                        "received_at",
+                        "total_cost",
+                        "received_by",
+                    ]
+                )
         except ValueError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

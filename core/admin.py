@@ -12,6 +12,7 @@ from .models import (
     ProductBatch,
     ShelfLevel,
     Store,
+    Supplier,
     SupplyOrder,
     SupplyOrderItem,
     Task,
@@ -73,8 +74,14 @@ class ProductAdmin(admin.ModelAdmin):
 class SupplyOrderItemInline(admin.TabularInline):
     model = SupplyOrderItem
     extra = 0
-    fields = ("product", "quantity", "price_per_unit")
+    fields = ("product", "quantity", "actual_quantity", "purchase_price")
     autocomplete_fields = ("product",)
+
+
+@admin.register(Supplier)
+class SupplierAdmin(admin.ModelAdmin):
+    list_display = ("name", "inn")
+    search_fields = ("name", "inn")
 
 
 @admin.register(Company)
@@ -89,21 +96,24 @@ class SupplyOrderAdmin(admin.ModelAdmin):
         "id",
         "company",
         "store",
+        "supplier",
         "status",
         "total_amount",
+        "total_cost",
         "created_at",
         "received_at",
         "created_by",
+        "received_by",
     )
-    list_filter = ("status", "company", "store")
-    search_fields = ("store__name", "company__name")
-    autocomplete_fields = ("company", "store", "created_by")
+    list_filter = ("status", "company", "store", "supplier")
+    search_fields = ("store__name", "company__name", "supplier__name")
+    autocomplete_fields = ("company", "store", "supplier", "created_by", "received_by")
     inlines = (SupplyOrderItemInline,)
 
 
 @admin.register(SupplyOrderItem)
 class SupplyOrderItemAdmin(admin.ModelAdmin):
-    list_display = ("order", "product", "quantity", "price_per_unit")
+    list_display = ("order", "product", "quantity", "actual_quantity", "purchase_price")
     list_filter = ("order__status", "order__company", "order__store")
     search_fields = ("product__sku", "product__name", "order__id")
     autocomplete_fields = ("order", "product")

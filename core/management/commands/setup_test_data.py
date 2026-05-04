@@ -93,19 +93,21 @@ class Command(BaseCommand):
             is_marked=True,
         )
 
-        price_per_unit = Decimal("72.50")
+        unit_price = Decimal("72.50")
         order = SupplyOrder.objects.create(
             company=company,
             store=store,
             status=SupplyOrder.Status.RECEIVED,
             received_at=timezone.now(),
-            total_amount=Decimal("150") * price_per_unit,
+            total_amount=Decimal("150") * unit_price,
+            total_cost=Decimal("150") * unit_price,
         )
         order_item = SupplyOrderItem.objects.create(
             order=order,
             product=milk,
             quantity=150,
-            price_per_unit=price_per_unit,
+            actual_quantity=150,
+            purchase_price=unit_price,
         )
 
         batches_spec = [
@@ -119,7 +121,7 @@ class Command(BaseCommand):
                 product=milk,
                 store=store,
                 supply_item=order_item,
-                purchase_price=price_per_unit,
+                purchase_price=unit_price,
                 initial_quantity=50,
                 current_quantity=50,
                 manufacture_date=today - timedelta(days=30),

@@ -177,6 +177,31 @@ class Company(models.Model):
         return self.name
 
 
+class Supplier(models.Model):
+    name = models.CharField(
+        max_length=255,
+        verbose_name="Название",
+        help_text="Наименование поставщика.",
+    )
+    contact_info = models.TextField(
+        blank=True,
+        verbose_name="Контактные данные",
+        help_text="Телефон, e-mail, адрес и другие контакты.",
+    )
+    inn = models.CharField(
+        max_length=12,
+        verbose_name="ИНН",
+        help_text="Идентификационный номер налогоплательщика (ИНН).",
+    )
+
+    class Meta:
+        verbose_name = "Поставщик"
+        verbose_name_plural = "Поставщики"
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Inventory(models.Model):
     class LocationStatus(models.TextChoices):
         ORDERED = "ordered", "Заказано"
@@ -266,6 +291,15 @@ class SupplyOrder(models.Model):
         verbose_name="Магазин",
         help_text="Магазин назначения: куда везут товар.",
     )
+    supplier = models.ForeignKey(
+        "Supplier",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supply_orders",
+        verbose_name="Поставщик",
+        help_text="Поставщик по договору (если указан).",
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -291,6 +325,13 @@ class SupplyOrder(models.Model):
         verbose_name="Сумма закупки",
         help_text="Итоговая сумма заказа (валюта проекта; может совпадать с суммой позиций).",
     )
+    total_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        verbose_name="Общая стоимость закупки",
+        help_text="Фактическая сумма при приёмке: Σ (факт × закупочная цена по строке).",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -299,6 +340,15 @@ class SupplyOrder(models.Model):
         related_name="created_supply_orders",
         verbose_name="Кем создан",
         help_text="Пользователь, оформивший заказ.",
+    )
+    received_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="received_supply_orders",
+        verbose_name="Кем принят",
+        help_text="Пользователь, зафиксировавший приёмку на складе/в магазине.",
     )
 
     class Meta:
@@ -332,14 +382,20 @@ class SupplyOrderItem(models.Model):
         help_text="Товар в строке заказа.",
     )
     quantity = models.PositiveIntegerField(
-        verbose_name="Количество",
+        verbose_name="Ожидаемое количество",
         help_text="Заказанное количество единиц по строке.",
     )
-    price_per_unit = models.DecimalField(
-        max_digits=12,
+    actual_quantity = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Фактическое количество",
+        help_text="Фактически принятое количество (заполняется при приёмке).",
+    )
+    purchase_price = models.DecimalField(
+        max_digits=10,
         decimal_places=2,
-        verbose_name="Цена за единицу",
-        help_text="Договорная закупочная цена за единицу в этой строке.",
+        default=Decimal("0.00"),
+        verbose_name="Цена закупки за единицу",
+        help_text="Закупочная цена за единицу товара в этой строке.",
     )
 
     class Meta:
@@ -377,7 +433,7 @@ class ProductBatch(models.Model):
         help_text="Строка заказа поставщику, по которой оприходована партия (если применимо).",
     )
     purchase_price = models.DecimalField(
-        max_digits=12,
+        max_digits=10,
         decimal_places=2,
         verbose_name="Закупочная цена",
         help_text="Себестоимость единицы в рамках этой партии.",
