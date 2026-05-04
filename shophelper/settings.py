@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django_filters',
     'rest_framework',
     'core',
+    'shophelper.apps.ShophelperConfig',
 ]
 
 MIDDLEWARE = [
