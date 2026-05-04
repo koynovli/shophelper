@@ -5,6 +5,7 @@ from .views import (
     EquipmentViewSet,
     InventoryViewSet,
     ProductBatchViewSet,
+    ScanCodeView,
     ShelfViewSet,
     SupplyOrderViewSet,
     ZoneViewSet,
@@ -19,5 +20,6 @@ router.register(r"shelves", ShelfViewSet, basename="shelf")
 router.register(r"inventory", InventoryViewSet, basename="inventory")
 
 urlpatterns = [
+    path("scan/", ScanCodeView.as_view(), name="scan-code"),
     path("", include(router.urls)),
 ]

@@ -8,16 +8,85 @@ from django_filters import rest_framework as filters
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import Equipment, Inventory, ProductBatch, Shelf, SupplyOrder, SupplyOrderItem, Zone
+from shophelper.utils import parse_data_matrix
+
+from .models import Equipment, Inventory, Product, ProductBatch, Shelf, SupplyOrder, SupplyOrderItem, Zone
 from .serializers import (
     EquipmentSerializer,
     InventorySerializer,
     ProductBatchSerializer,
+    ProductSerializer,
     ShelfSerializer,
     SupplyOrderSerializer,
     ZoneSerializer,
 )
+
+
+class ScanCodeView(APIView):
+    """
+    Принимает сырую строку со сканера маркировки, парсит GS1 Data Matrix,
+    ищет товар по GTIN и активную партию по серийному номеру (AI 21).
+    """
+
+    def post(self, request):
+        raw_code = request.data.get("raw_code")
+        if raw_code is None or not isinstance(raw_code, str):
+            return Response(
+                {"detail": "Ожидается поле raw_code (строка)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        parsed = parse_data_matrix(raw_code)
+        gtin = parsed.get("gtin")
+        serial = parsed.get("serial")
+
+        if not gtin:
+            return Response(
+                {"product": None, "batch": None, "status": "not_found"},
+                status=status.HTTP_200_OK,
+            )
+
+        product = Product.objects.filter(gtin=gtin).select_related("category").first()
+        if product is None:
+            return Response(
+                {"product": None, "batch": None, "status": "not_found"},
+                status=status.HTTP_200_OK,
+            )
+
+        product_data = ProductSerializer(product).data
+
+        if not serial:
+            return Response(
+                {"product": product_data, "batch": None, "status": "not_found"},
+                status=status.HTTP_200_OK,
+            )
+
+        batch = (
+            ProductBatch.objects.filter(
+                product=product,
+                serial_number=serial,
+                is_active=True,
+            )
+            .select_related("product", "store", "supply_item")
+            .first()
+        )
+
+        if batch is None:
+            return Response(
+                {"product": product_data, "batch": None, "status": "not_found"},
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {
+                "product": product_data,
+                "batch": ProductBatchSerializer(batch).data,
+                "status": "found",
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ProductBatchFilter(filters.FilterSet):

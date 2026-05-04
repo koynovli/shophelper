@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     Equipment,
     Inventory,
+    Product,
     ProductBatch,
     Shelf,
     Supplier,
@@ -10,6 +11,12 @@ from .models import (
     SupplyOrderItem,
     Zone,
 )
+
+
+class ProductSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product
+        fields = "__all__"
 
 
 class SupplierSerializer(serializers.ModelSerializer):

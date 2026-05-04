@@ -84,6 +84,7 @@ class Command(BaseCommand):
         milk = Product.objects.create(
             name=MILK_NAME,
             sku=MILK_SKU,
+            gtin="04601234567890",
             category=category,
             price=Decimal("89.90"),
             width=round(random.uniform(55.0, 75.0), 1),
@@ -111,12 +112,12 @@ class Command(BaseCommand):
         )
 
         batches_spec = [
-            ("Просрочка", today - timedelta(days=1)),
-            ("Горит", today + timedelta(days=1)),
-            ("Свежее", today + timedelta(days=10)),
+            ("Просрочка", today - timedelta(days=1), None),
+            ("Горит", today + timedelta(days=1), None),
+            ("Свежее", today + timedelta(days=10), "SN-DEMO-001"),
         ]
         batches = []
-        for _, exp_date in batches_spec:
+        for _, exp_date, serial in batches_spec:
             batch = ProductBatch.objects.create(
                 product=milk,
                 store=store,
@@ -127,6 +128,7 @@ class Command(BaseCommand):
                 manufacture_date=today - timedelta(days=30),
                 expiration_date=exp_date,
                 is_active=True,
+                serial_number=serial,
             )
             batches.append(batch)
 

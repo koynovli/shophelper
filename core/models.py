@@ -107,6 +107,14 @@ class Product(models.Model):
         verbose_name="SKU",
         help_text="Артикул (SKU) товара.",
     )
+    gtin = models.CharField(
+        max_length=14,
+        unique=True,
+        null=True,
+        blank=True,
+        verbose_name="GTIN",
+        help_text="Глобальный номер товарной единицы (14 цифр), маркировка Честный ЗНАК / GS1.",
+    )
     category = models.ForeignKey(
         Category,
         on_delete=models.PROTECT,
@@ -470,6 +478,13 @@ class ProductBatch(models.Model):
         default=True,
         verbose_name="Активна",
         help_text="Неактивные партии исключаются из подбора под новые операции.",
+    )
+    serial_number = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        verbose_name="Серийный номер",
+        help_text="Идентификатор единицы маркированного товара (AI 21 в Data Matrix).",
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
