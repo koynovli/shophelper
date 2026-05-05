@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, Factory, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
+import { CalendarDays, Factory, Map, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
 
 import api from './api';
+import StoreMap from './components/StoreMap';
 
 type Supplier = {
   id: number;
@@ -33,6 +34,7 @@ const STATUS_STYLES: Record<string, string> = {
 function App() {
   const [orders, setOrders] = useState<SupplyOrder[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [activeTab, setActiveTab] = useState<'orders' | 'map'>('orders');
 
   useEffect(() => {
     const fetchOrders = async (): Promise<void> => {
@@ -87,68 +89,103 @@ function App() {
         <div className="flex items-center gap-3">
           <ShoppingCart className="h-8 w-8 text-emerald-400" />
           <h1 className="text-2xl font-bold tracking-tight text-white">
-            Список заказов
+            ShopHelper UI
           </h1>
         </div>
         <div className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-400">
-          API: /supply-orders/
+          Dark Control Panel
         </div>
       </header>
 
       <main className="mx-auto w-full max-w-5xl">
-        {loading ? (
-          <div className="rounded-3xl border border-slate-800 bg-slate-900 p-10 text-center text-lg text-slate-300 shadow-2xl">
-            Loading...
-          </div>
-        ) : !hasOrders ? (
-          <div className="rounded-3xl border border-slate-800 bg-slate-900 p-10 text-center text-lg text-slate-300 shadow-2xl">
-            Заказы не найдены
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            {orders.map((order) => (
-              <article
-                key={order.id}
-                className="group rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl transition hover:border-emerald-500/40"
-              >
-                <div className="mb-5 flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <ReceiptText className="h-5 w-5 text-emerald-400" />
-                    <h2 className="text-lg font-semibold text-white">
-                      Заказ #{order.id}
-                    </h2>
-                  </div>
-                  <span
-                    className={`rounded-full border px-3 py-1 text-xs font-medium uppercase tracking-wide ${getStatusStyle(order.status)}`}
+        <div className="mb-5 flex items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900 p-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('orders')}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'orders'
+                ? 'bg-emerald-500/20 text-emerald-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <ReceiptText className="h-4 w-4" />
+            Список заказов
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('map')}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'map'
+                ? 'bg-indigo-500/20 text-indigo-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <Map className="h-4 w-4" />
+            Карта зала
+          </button>
+        </div>
+
+        {activeTab === 'orders' ? (
+          <>
+            {loading ? (
+              <div className="rounded-3xl border border-slate-800 bg-slate-900 p-10 text-center text-lg text-slate-300 shadow-2xl">
+                Loading...
+              </div>
+            ) : !hasOrders ? (
+              <div className="rounded-3xl border border-slate-800 bg-slate-900 p-10 text-center text-lg text-slate-300 shadow-2xl">
+                Заказы не найдены
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                {orders.map((order) => (
+                  <article
+                    key={order.id}
+                    className="group rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl transition hover:border-emerald-500/40"
                   >
-                    {getStatusLabel(order.status)}
-                  </span>
-                </div>
+                    <div className="mb-5 flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <ReceiptText className="h-5 w-5 text-emerald-400" />
+                        <h2 className="text-lg font-semibold text-white">
+                          Заказ #{order.id}
+                        </h2>
+                      </div>
+                      <span
+                        className={`rounded-full border px-3 py-1 text-xs font-medium uppercase tracking-wide ${getStatusStyle(order.status)}`}
+                      >
+                        {getStatusLabel(order.status)}
+                      </span>
+                    </div>
 
-                <div className="space-y-3 text-sm text-slate-300">
-                  <div className="flex items-center gap-3">
-                    <Factory className="h-4 w-4 text-blue-300" />
-                    <span>
-                      Поставщик: <strong className="text-slate-100">{getSupplierName(order)}</strong>
-                    </span>
-                  </div>
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <div className="flex items-center gap-3">
+                        <Factory className="h-4 w-4 text-blue-300" />
+                        <span>
+                          Поставщик: <strong className="text-slate-100">{getSupplierName(order)}</strong>
+                        </span>
+                      </div>
 
-                  <div className="flex items-center gap-3">
-                    <Tag className="h-4 w-4 text-amber-300" />
-                    <span>
-                      Статус: <strong className="text-slate-100">{getStatusLabel(order.status)}</strong>
-                    </span>
-                  </div>
+                      <div className="flex items-center gap-3">
+                        <Tag className="h-4 w-4 text-amber-300" />
+                        <span>
+                          Статус: <strong className="text-slate-100">{getStatusLabel(order.status)}</strong>
+                        </span>
+                      </div>
 
-                  <div className="flex items-center gap-3">
-                    <CalendarDays className="h-4 w-4 text-indigo-300" />
-                    <span>
-                      Дата создания: <strong className="text-slate-100">{formatDate(order.created_at)}</strong>
-                    </span>
-                  </div>
-                </div>
-              </article>
-            ))}
+                      <div className="flex items-center gap-3">
+                        <CalendarDays className="h-4 w-4 text-indigo-300" />
+                        <span>
+                          Дата создания: <strong className="text-slate-100">{formatDate(order.created_at)}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-4 shadow-2xl">
+            <StoreMap />
           </div>
         )}
       </main>
