@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   MapPinned,
   Minus,
@@ -46,9 +52,6 @@ type Zone = {
 /** Пикселей на 1 см координат из БД */
 const PX_PER_CM = 10;
 
-/** Шаг сетки на карте: 1 м = 100 см → 100 * PX_PER_CM пикселей */
-const GRID_STEP_PX = 100 * PX_PER_CM;
-
 const MIN_LABEL_WIDTH_PX = 72;
 const MIN_LABEL_HEIGHT_PX = 28;
 
@@ -56,6 +59,11 @@ type WheelConfig = {
   step?: number;
   smoothStep?: number;
   disabled?: boolean;
+};
+
+/** Доп. проп библиотеки (в типах может отсутствовать) */
+type TransformWrapperExtras = {
+  alignmentAnimation?: { size?: number };
 };
 
 const normalizeColor = (value: string): string => {
@@ -123,6 +131,9 @@ function StoreMap() {
   const [loading, setLoading] = useState<boolean>(true);
   const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
   const [editMode, setEditMode] = useState(false);
+  const [minScale, setMinScale] = useState(0.05);
+
+  const viewportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {
@@ -146,6 +157,33 @@ function StoreMap() {
   const mapWidthPx = dimensions.width * 100 * PX_PER_CM;
   const mapHeightPx = dimensions.height * 100 * PX_PER_CM;
 
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el || mapWidthPx <= 0 || mapHeightPx <= 0) {
+      return;
+    }
+
+    const recalc = (): void => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w <= 0 || h <= 0) {
+        return;
+      }
+      const scale = Math.min(w / mapWidthPx, h / mapHeightPx);
+      const next = Math.min(Math.max(scale, 1e-5), 2);
+      setMinScale(next);
+    };
+
+    recalc();
+    const ro = new ResizeObserver(recalc);
+    ro.observe(el);
+    window.addEventListener('resize', recalc);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', recalc);
+    };
+  }, [mapWidthPx, mapHeightPx]);
+
   const allEquipment = useMemo(
     () =>
       zones.flatMap((zone) =>
@@ -158,6 +196,8 @@ function StoreMap() {
     [zones],
   );
 
+  const meterGridPx = 100 * PX_PER_CM;
+
   const gridStyle = useMemo(
     (): React.CSSProperties => ({
       backgroundColor: '#0f172a',
@@ -166,11 +206,11 @@ function StoreMap() {
         linear-gradient(to bottom, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
         radial-gradient(circle at 0 0, rgba(56, 189, 248, 0.05), transparent 50%)
       `,
-      backgroundSize: `${GRID_STEP_PX}px ${GRID_STEP_PX}px, ${GRID_STEP_PX}px ${GRID_STEP_PX}px, 100% 100%`,
+      backgroundSize: `${meterGridPx}px ${meterGridPx}px, ${meterGridPx}px ${meterGridPx}px, 100% 100%`,
       boxShadow:
         'inset 0 1px 0 rgba(255,255,255,0.04), 0 24px 48px rgba(0,0,0,0.45)',
     }),
-    [],
+    [meterGridPx],
   );
 
   const handleMapClick = (event: React.MouseEvent<HTMLDivElement>): void => {
@@ -194,15 +234,34 @@ function StoreMap() {
     );
   }
 
+  const transformWrapperProps = {
+    initialScale: minScale,
+    minScale,
+    maxScale: 2,
+    limitToBounds: true,
+    centerOnInit: true,
+    wheel: {
+      step: 0.02,
+      smoothStep: 0.002,
+    } as WheelConfig,
+    doubleClick: { disabled: true },
+    autoAlignment: {
+      sizeX: 0,
+      sizeY: 0,
+      animationTime: 0,
+    },
+    alignmentAnimation: { size: 0 },
+  } satisfies Record<string, unknown> & TransformWrapperExtras;
+
   return (
     <section className="flex min-h-0 w-full flex-col gap-3">
-      {/* Панель администрирования */}
+      {/* Размеры магазина — вне области масштабирования */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Admin
+          Размеры зала (м)
         </span>
         <label className="flex items-center gap-2">
-          <span className="text-slate-400">Ширина (м)</span>
+          <span className="text-slate-400">Ширина</span>
           <input
             type="number"
             min={1}
@@ -218,7 +277,7 @@ function StoreMap() {
           />
         </label>
         <label className="flex items-center gap-2">
-          <span className="text-slate-400">Длина (м)</span>
+          <span className="text-slate-400">Длина</span>
           <input
             type="number"
             min={1}
@@ -233,6 +292,9 @@ function StoreMap() {
             className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
           />
         </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
         <button
           type="button"
           onClick={() => setEditMode((v) => !v)}
@@ -254,8 +316,8 @@ function StoreMap() {
         </span>
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
           <Ruler className="h-3.5 w-3.5 text-indigo-300" />
-          {dimensions.width}×{dimensions.height} м · {PX_PER_CM} px/см · сетка 1 м ={' '}
-          {GRID_STEP_PX}px
+          {dimensions.width}×{dimensions.height} м · {PX_PER_CM} px/см · 1 м ={' '}
+          {meterGridPx}px · fit minScale ≈ {minScale.toFixed(4)}
         </span>
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
           <Warehouse className="h-3.5 w-3.5 text-amber-300" />
@@ -263,35 +325,27 @@ function StoreMap() {
         </span>
       </div>
 
-      <div className="relative min-h-[calc(100dvh-280px)] w-full flex-1 overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl">
+      <div
+        ref={viewportRef}
+        className="relative h-[600px] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-900"
+      >
         <TransformWrapper
-          key={`${dimensions.width}-${dimensions.height}-${mapWidthPx}-${mapHeightPx}`}
-          initialScale={0.05}
-          minScale={0.01}
-          maxScale={2}
-          limitToBounds={true}
-          centerOnInit={true}
-          wheel={
-            {
-              step: 0.05,
-              smoothStep: 0.005,
-            } as WheelConfig
-          }
-          doubleClick={{ disabled: true }}
+          key={`${mapWidthPx}x${mapHeightPx}`}
+          {...transformWrapperProps}
         >
           <>
             <MapZoomToolbar />
             <TransformComponent
-              wrapperClass="!h-full !w-full !max-h-full !max-w-full"
+              wrapperClass="!h-full !w-full"
               wrapperStyle={{ width: '100%', height: '100%' }}
-              contentClass="!flex !h-full !w-full !items-center !justify-center !shadow-none"
+              contentStyle={{ width: mapWidthPx, height: mapHeightPx }}
+              contentClass="!shadow-none"
             >
               <div
                 role={editMode ? 'presentation' : undefined}
-                className={`relative shrink-0 rounded-lg ring-1 ring-slate-600/70 ${editMode ? 'cursor-crosshair' : ''}`}
+                className={`relative h-full w-full rounded-lg ring-1 ring-slate-600/70 ${editMode ? 'cursor-crosshair' : ''}`}
                 style={{
-                  width: mapWidthPx,
-                  height: mapHeightPx,
+                  imageRendering: 'pixelated',
                   ...gridStyle,
                 }}
                 onClick={handleMapClick}
