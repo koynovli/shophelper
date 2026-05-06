@@ -131,6 +131,15 @@ function StoreMap() {
   const [loading, setLoading] = useState<boolean>(true);
   const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
   const [editMode, setEditMode] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [newObjCoords, setNewObjCoords] = useState({ x: 0, y: 0 });
+  const [newEquipmentForm, setNewEquipmentForm] = useState({
+    name: '',
+    widthCm: 120,
+    lengthCm: 60,
+    orientation: 0 as 0 | 90 | 180 | 270,
+  });
+  const [isSaving, setIsSaving] = useState(false);
   const [minScale, setMinScale] = useState(0.05);
 
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -197,6 +206,7 @@ function StoreMap() {
   );
 
   const meterGridPx = 100 * PX_PER_CM;
+  const defaultZoneId = zones[0]?.id ?? null;
 
   const gridStyle = useMemo(
     (): React.CSSProperties => ({
@@ -223,7 +233,61 @@ function StoreMap() {
     const offsetY = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
     const x_cm = Math.round(offsetX / PX_PER_CM);
     const y_cm = Math.round(offsetY / PX_PER_CM);
-    console.log('Клик в координатах (см):', x_cm, y_cm);
+    setNewObjCoords({ x: x_cm, y: y_cm });
+    setIsModalOpen(true);
+  };
+
+  const resetNewEquipmentForm = (): void => {
+    setNewEquipmentForm({
+      name: '',
+      widthCm: 120,
+      lengthCm: 60,
+      orientation: 0,
+    });
+  };
+
+  const handleSaveEquipment = async (): Promise<void> => {
+    if (!defaultZoneId) {
+      alert('Нет доступной зоны для добавления оборудования.');
+      return;
+    }
+    if (!newEquipmentForm.name.trim()) {
+      alert('Введите название оборудования.');
+      return;
+    }
+
+    const payload = {
+      name: newEquipmentForm.name.trim(),
+      zone: defaultZoneId,
+      type: 'shelf',
+      pos_x: newObjCoords.x,
+      pos_y: newObjCoords.y,
+      width: newEquipmentForm.widthCm,
+      height: newEquipmentForm.lengthCm,
+      orientation: newEquipmentForm.orientation,
+    };
+
+    try {
+      setIsSaving(true);
+      const response = await api.post('/floor-equipment/', payload);
+      if (response.status === 201) {
+        const createdEquipment = response.data as Equipment;
+        setZones((prevZones) =>
+          prevZones.map((zone) =>
+            zone.id === defaultZoneId
+              ? { ...zone, equipment: [...zone.equipment, createdEquipment] }
+              : zone,
+          ),
+        );
+        setIsModalOpen(false);
+        resetNewEquipmentForm();
+      }
+    } catch (error) {
+      console.error('Ошибка при сохранении оборудования:', error);
+      alert('Не удалось сохранить оборудование. Проверьте консоль.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (loading) {
@@ -440,11 +504,118 @@ function StoreMap() {
           Колёсико — зум · перетаскивание — панорама
           {editMode ? (
             <span className="mt-1 block text-amber-200/90">
-              Редактирование: клик по карте → координаты в консоли (см)
+              Редактирование: клик по карте → форма добавления оборудования
             </span>
           ) : null}
         </div>
       </div>
+
+      {isModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
+            <h3 className="mb-4 text-lg font-semibold text-slate-100">
+              Новое оборудование
+            </h3>
+
+            <div className="mb-4 grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-md border border-slate-700 bg-slate-900/70 px-3 py-2 text-slate-300">
+                X (см): <span className="font-semibold text-slate-100">{newObjCoords.x}</span>
+              </div>
+              <div className="rounded-md border border-slate-700 bg-slate-900/70 px-3 py-2 text-slate-300">
+                Y (см): <span className="font-semibold text-slate-100">{newObjCoords.y}</span>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <label className="block text-sm text-slate-300">
+                Название оборудования
+                <input
+                  type="text"
+                  value={newEquipmentForm.name}
+                  onChange={(e) =>
+                    setNewEquipmentForm((prev) => ({ ...prev, name: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                  placeholder="Например, Стеллаж №5"
+                />
+              </label>
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block text-sm text-slate-300">
+                  Ширина (см)
+                  <input
+                    type="number"
+                    min={1}
+                    value={newEquipmentForm.widthCm}
+                    onChange={(e) =>
+                      setNewEquipmentForm((prev) => ({
+                        ...prev,
+                        widthCm: Math.max(1, Number(e.target.value) || 1),
+                      }))
+                    }
+                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                  />
+                </label>
+                <label className="block text-sm text-slate-300">
+                  Глубина/длина (см)
+                  <input
+                    type="number"
+                    min={1}
+                    value={newEquipmentForm.lengthCm}
+                    onChange={(e) =>
+                      setNewEquipmentForm((prev) => ({
+                        ...prev,
+                        lengthCm: Math.max(1, Number(e.target.value) || 1),
+                      }))
+                    }
+                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                  />
+                </label>
+              </div>
+
+              <label className="block text-sm text-slate-300">
+                Угол поворота
+                <select
+                  value={newEquipmentForm.orientation}
+                  onChange={(e) =>
+                    setNewEquipmentForm((prev) => ({
+                      ...prev,
+                      orientation: Number(e.target.value) as 0 | 90 | 180 | 270,
+                    }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                >
+                  <option value={0}>0°</option>
+                  <option value={90}>90°</option>
+                  <option value={180}>180°</option>
+                  <option value={270}>270°</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsModalOpen(false);
+                  resetNewEquipmentForm();
+                }}
+                className="rounded-md border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-slate-300 transition hover:border-slate-500"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={handleSaveEquipment}
+                className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSaving ? 'Сохранение...' : 'Сохранить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
