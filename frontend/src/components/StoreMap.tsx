@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   MapPinned,
   Minus,
+  Pencil,
   Plus,
   RotateCcw,
   Ruler,
@@ -42,16 +43,20 @@ type Zone = {
   equipment: Equipment[];
 };
 
-/** Координаты из БД — сантиметры; на экране 1 см = 1 px */
-const CM_TO_PX = 1;
+/** Пикселей на 1 см координат из БД */
+const PX_PER_CM = 10;
 
-/** Клетка сетки: 100×100 px ↔ 100×100 см ↔ 1×1 м */
-const GRID_CELL_PX = 100;
-
-const PADDING = 48;
+/** Шаг сетки на карте: 1 м = 100 см → 100 * PX_PER_CM пикселей */
+const GRID_STEP_PX = 100 * PX_PER_CM;
 
 const MIN_LABEL_WIDTH_PX = 72;
 const MIN_LABEL_HEIGHT_PX = 28;
+
+type WheelConfig = {
+  step?: number;
+  smoothStep?: number;
+  disabled?: boolean;
+};
 
 const normalizeColor = (value: string): string => {
   if (!value) {
@@ -116,6 +121,8 @@ function MapZoomToolbar() {
 function StoreMap() {
   const [zones, setZones] = useState<Zone[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
+  const [editMode, setEditMode] = useState(false);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {
@@ -136,6 +143,9 @@ function StoreMap() {
     fetchZones();
   }, []);
 
+  const mapWidthPx = dimensions.width * 100 * PX_PER_CM;
+  const mapHeightPx = dimensions.height * 100 * PX_PER_CM;
+
   const allEquipment = useMemo(
     () =>
       zones.flatMap((zone) =>
@@ -148,59 +158,33 @@ function StoreMap() {
     [zones],
   );
 
-  const bounds = useMemo(() => {
-    if (allEquipment.length === 0) {
-      return {
-        minX: 0,
-        minY: 0,
-        width: Math.max(1000 + PADDING * 2, 900),
-        height: Math.max(600 + PADDING * 2, 520),
-      };
-    }
-
-    const minX = Math.min(
-      ...allEquipment.map((eq) => eq.pos_x - eq.width / 2),
-    );
-    const maxX = Math.max(
-      ...allEquipment.map((eq) => eq.pos_x + eq.width / 2),
-    );
-    const minY = Math.min(
-      ...allEquipment.map((eq) => eq.pos_y - eq.height / 2),
-    );
-    const maxY = Math.max(
-      ...allEquipment.map((eq) => eq.pos_y + eq.height / 2),
-    );
-
-    const spanX = maxX - minX;
-    const spanY = maxY - minY;
-
-    return {
-      minX,
-      minY,
-      width: Math.max(spanX * CM_TO_PX + PADDING * 2, 900),
-      height: Math.max(spanY * CM_TO_PX + PADDING * 2, 520),
-    };
-  }, [allEquipment]);
-
-  const gridStyle = useMemo((): React.CSSProperties => {
-    const phaseX =
-      (((-bounds.minX * CM_TO_PX + PADDING) % GRID_CELL_PX) + GRID_CELL_PX) %
-      GRID_CELL_PX;
-    const phaseY =
-      (((-bounds.minY * CM_TO_PX + PADDING) % GRID_CELL_PX) + GRID_CELL_PX) %
-      GRID_CELL_PX;
-
-    return {
+  const gridStyle = useMemo(
+    (): React.CSSProperties => ({
       backgroundColor: '#0f172a',
       backgroundImage: `
-        linear-gradient(to right, rgba(148, 163, 184, 0.14) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(148, 163, 184, 0.14) 1px, transparent 1px),
-        radial-gradient(circle at 0 0, rgba(56, 189, 248, 0.06), transparent 55%)
+        linear-gradient(to right, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
+        radial-gradient(circle at 0 0, rgba(56, 189, 248, 0.05), transparent 50%)
       `,
-      backgroundSize: `${GRID_CELL_PX}px ${GRID_CELL_PX}px, ${GRID_CELL_PX}px ${GRID_CELL_PX}px, 100% 100%`,
-      backgroundPosition: `${phaseX}px ${phaseY}px, ${phaseX}px ${phaseY}px, 0 0`,
-    };
-  }, [bounds.minX, bounds.minY]);
+      backgroundSize: `${GRID_STEP_PX}px ${GRID_STEP_PX}px, ${GRID_STEP_PX}px ${GRID_STEP_PX}px, 100% 100%`,
+      boxShadow:
+        'inset 0 1px 0 rgba(255,255,255,0.04), 0 24px 48px rgba(0,0,0,0.45)',
+    }),
+    [],
+  );
+
+  const handleMapClick = (event: React.MouseEvent<HTMLDivElement>): void => {
+    if (!editMode) {
+      return;
+    }
+    const mapEl = event.currentTarget;
+    const rect = mapEl.getBoundingClientRect();
+    const offsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
+    const offsetY = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
+    const x_cm = Math.round(offsetX / PX_PER_CM);
+    const y_cm = Math.round(offsetY / PX_PER_CM);
+    console.log('Клик в координатах (см):', x_cm, y_cm);
+  };
 
   if (loading) {
     return (
@@ -211,63 +195,113 @@ function StoreMap() {
   }
 
   return (
-    <section className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400">
-        <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5">
-          <MapPinned className="h-4 w-4 text-emerald-300" />
+    <section className="flex min-h-0 w-full flex-col gap-3">
+      {/* Панель администрирования */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
+        <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Admin
+        </span>
+        <label className="flex items-center gap-2">
+          <span className="text-slate-400">Ширина (м)</span>
+          <input
+            type="number"
+            min={1}
+            step={0.5}
+            value={dimensions.width}
+            onChange={(e) =>
+              setDimensions((d) => ({
+                ...d,
+                width: Math.max(1, Number(e.target.value) || 1),
+              }))
+            }
+            className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="text-slate-400">Длина (м)</span>
+          <input
+            type="number"
+            min={1}
+            step={0.5}
+            value={dimensions.height}
+            onChange={(e) =>
+              setDimensions((d) => ({
+                ...d,
+                height: Math.max(1, Number(e.target.value) || 1),
+              }))
+            }
+            className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={() => setEditMode((v) => !v)}
+          className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+            editMode
+              ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
+              : 'border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500'
+          }`}
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Режим редактирования
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+        <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
+          <MapPinned className="h-3.5 w-3.5 text-emerald-300" />
           Digital Twin
         </span>
-        <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5">
-          <Ruler className="h-4 w-4 text-indigo-300" />
-          1 см в данных = 1 px · клетка {GRID_CELL_PX}×{GRID_CELL_PX} px = 1×1 м
+        <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
+          <Ruler className="h-3.5 w-3.5 text-indigo-300" />
+          {dimensions.width}×{dimensions.height} м · {PX_PER_CM} px/см · сетка 1 м ={' '}
+          {GRID_STEP_PX}px
         </span>
-        <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5">
-          <Warehouse className="h-4 w-4 text-amber-300" />
+        <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
+          <Warehouse className="h-3.5 w-3.5 text-amber-300" />
           Объектов: {allEquipment.length}
         </span>
       </div>
 
-      <div className="relative h-[min(72vh,820px)] min-h-[440px] w-full overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl">
+      <div className="relative min-h-[calc(100dvh-280px)] w-full flex-1 overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl">
         <TransformWrapper
-          initialScale={1}
-          minScale={0.15}
-          maxScale={8}
-          limitToBounds={false}
-          centerOnInit
-          wheel={{
-            step: 0.12,
-          }}
-          pinch={{
-            step: 5,
-          }}
+          key={`${dimensions.width}-${dimensions.height}-${mapWidthPx}-${mapHeightPx}`}
+          initialScale={0.05}
+          minScale={0.01}
+          maxScale={2}
+          limitToBounds={true}
+          centerOnInit={true}
+          wheel={
+            {
+              step: 0.05,
+              smoothStep: 0.005,
+            } as WheelConfig
+          }
           doubleClick={{ disabled: true }}
         >
           <>
             <MapZoomToolbar />
             <TransformComponent
-              wrapperClass="!w-full !h-full !flex !items-center !justify-center"
-              contentClass="!shadow-none"
+              wrapperClass="!h-full !w-full !max-h-full !max-w-full"
+              wrapperStyle={{ width: '100%', height: '100%' }}
+              contentClass="!flex !h-full !w-full !items-center !justify-center !shadow-none"
             >
               <div
-                className="relative rounded-xl ring-1 ring-slate-700/60"
+                role={editMode ? 'presentation' : undefined}
+                className={`relative shrink-0 rounded-lg ring-1 ring-slate-600/70 ${editMode ? 'cursor-crosshair' : ''}`}
                 style={{
-                  width: `${bounds.width}px`,
-                  height: `${bounds.height}px`,
+                  width: mapWidthPx,
+                  height: mapHeightPx,
                   ...gridStyle,
-                  boxShadow:
-                    'inset 0 1px 0 rgba(255,255,255,0.04), 0 24px 48px rgba(0,0,0,0.45)',
                 }}
+                onClick={handleMapClick}
               >
                 {zones.map((zone) =>
                   zone.equipment.map((eq) => {
-                    const left =
-                      (eq.pos_x - eq.width / 2 - bounds.minX) * CM_TO_PX +
-                      PADDING;
-                    const top =
-                      (eq.pos_y - eq.height / 2 - bounds.minY) * CM_TO_PX +
-                      PADDING;
-                    const pixelWidth = Math.max(eq.width * CM_TO_PX, 12);
-                    const pixelHeight = Math.max(eq.height * CM_TO_PX, 12);
+                    const left = eq.pos_x * PX_PER_CM;
+                    const top = eq.pos_y * PX_PER_CM;
+                    const pixelWidth = Math.max(eq.width * PX_PER_CM, 8);
+                    const pixelHeight = Math.max(eq.height * PX_PER_CM, 8);
                     const zoneColor = normalizeColor(zone.color);
                     const showInlineLabel =
                       pixelWidth >= MIN_LABEL_WIDTH_PX &&
@@ -277,8 +311,9 @@ function StoreMap() {
                       <button
                         key={eq.id}
                         type="button"
+                        data-equipment
                         title={eq.name}
-                        className="group absolute overflow-hidden rounded-lg text-left outline-none ring-1 ring-white/10 transition hover:ring-emerald-400/70 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400"
+                        className={`group absolute overflow-hidden rounded-lg text-left outline-none ring-1 ring-white/10 transition hover:ring-emerald-400/70 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${editMode ? 'pointer-events-none' : ''}`}
                         style={{
                           left: `${left}px`,
                           top: `${top}px`,
@@ -302,11 +337,14 @@ function StoreMap() {
                             )
                           `,
                         }}
-                        onClick={() => {
-                          console.log(
-                            `Полки стеллажа "${eq.name}"`,
-                            eq.shelves ?? [],
-                          );
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!editMode) {
+                            console.log(
+                              `Полки стеллажа "${eq.name}"`,
+                              eq.shelves ?? [],
+                            );
+                          }
                         }}
                       >
                         <span
@@ -316,21 +354,21 @@ function StoreMap() {
                           }}
                         />
 
-                        <span className="pointer-events-none absolute left-1.5 top-1.5 z-10 rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-100 shadow-sm backdrop-blur-[2px]">
+                        <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/55 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-100 shadow-sm backdrop-blur-[2px]">
                           {eq.type}
                         </span>
 
                         {showInlineLabel ? (
-                          <span className="pointer-events-none absolute inset-x-1.5 bottom-1.5 top-auto z-10 truncate text-center text-[11px] font-semibold leading-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
+                          <span className="pointer-events-none absolute inset-x-1 bottom-1 top-auto z-10 truncate text-center text-[10px] font-semibold leading-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
                             {eq.name}
                           </span>
                         ) : null}
 
                         <span
-                          className={`pointer-events-none absolute left-1/2 z-20 max-w-[min(280px,calc(100vw-4rem))] -translate-x-1/2 whitespace-normal rounded-lg border border-slate-600/90 bg-slate-950/95 px-2.5 py-1.5 text-left text-xs leading-snug text-slate-100 shadow-2xl backdrop-blur-sm transition-opacity duration-150 sm:whitespace-nowrap ${
+                          className={`pointer-events-none absolute left-1/2 z-20 max-w-[min(280px,calc(100vw-4rem))] -translate-x-1/2 whitespace-normal rounded-md border border-slate-600/90 bg-slate-950/95 px-2 py-1 text-left text-[10px] leading-snug text-slate-100 shadow-2xl backdrop-blur-sm transition-opacity duration-150 sm:whitespace-nowrap ${
                             showInlineLabel
-                              ? 'bottom-full mb-2 opacity-0 group-hover:opacity-100'
-                              : '-top-9 opacity-0 group-hover:opacity-100'
+                              ? 'bottom-full mb-1 opacity-0 group-hover:opacity-100'
+                              : '-top-7 opacity-0 group-hover:opacity-100'
                           }`}
                         >
                           {eq.name}
@@ -344,8 +382,13 @@ function StoreMap() {
           </>
         </TransformWrapper>
 
-        <div className="pointer-events-none absolute bottom-3 left-4 z-20 rounded-lg border border-slate-700/80 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-400 backdrop-blur-sm">
-          Колёсико мыши — масштаб · перетаскивание — панорама
+        <div className="pointer-events-none absolute bottom-3 left-4 z-20 max-w-[min(100%,24rem)] rounded-lg border border-slate-700/80 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-400 backdrop-blur-sm">
+          Колёсико — зум · перетаскивание — панорама
+          {editMode ? (
+            <span className="mt-1 block text-amber-200/90">
+              Редактирование: клик по карте → координаты в консоли (см)
+            </span>
+          ) : null}
         </div>
       </div>
     </section>
