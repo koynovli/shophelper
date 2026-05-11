@@ -25,6 +25,7 @@ import {
 } from 'react-zoom-pan-pinch';
 
 import api from '../api';
+import type { AxiosError } from 'axios';
 import type { FloorEquipment, FloorEquipmentType, FloorZone } from '../types/floorPlan';
 import { normalizeFloorEquipment } from '../types/floorPlan';
 import {
@@ -70,6 +71,12 @@ function nextGlobalEquipmentName(zones: FloorZone[], type: FloorEquipmentType): 
   }
   return candidate;
 }
+
+type ProductBrief = {
+  id: number;
+  name: string;
+  sku: string;
+};
 
 type WheelConfig = {
   step?: number;
@@ -143,6 +150,15 @@ function StoreMap() {
     shelfCount: 4,
   });
   const [isSaving, setIsSaving] = useState(false);
+  const [placementProducts, setPlacementProducts] = useState<ProductBrief[]>([]);
+  const [placementProductId, setPlacementProductId] = useState<string>('');
+  const [placementQty, setPlacementQty] = useState<number>(1);
+  const [placementLoading, setPlacementLoading] = useState(false);
+  const [placementSaving, setPlacementSaving] = useState(false);
+  const [placementFeedback, setPlacementFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
   const [minScale, setMinScale] = useState(0.05);
 
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -720,6 +736,107 @@ function StoreMap() {
   }, [isModalOpen, isNameManual, modalMode, newEquipmentForm.type]);
 
   useEffect(() => {
+    if (!isModalOpen || modalMode !== 'edit' || !selectedEquipmentId) {
+      return;
+    }
+    let cancelled = false;
+    setPlacementFeedback(null);
+    void (async () => {
+      setPlacementLoading(true);
+      try {
+        const r = await api.get<ProductBrief[] | { results?: ProductBrief[] }>('/products/');
+        const raw = Array.isArray(r.data) ? r.data : (r.data.results ?? []);
+        if (!cancelled) {
+          setPlacementProducts(raw);
+          if (raw.length > 0) {
+            setPlacementProductId((prev) => {
+              if (prev && raw.some((p) => String(p.id) === prev)) {
+                return prev;
+              }
+              return String(raw[0].id);
+            });
+          } else {
+            setPlacementProductId('');
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setPlacementProducts([]);
+          setPlacementProductId('');
+          setPlacementFeedback({
+            type: 'err',
+            text: 'Не удалось загрузить список товаров.',
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setPlacementLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isModalOpen, modalMode, selectedEquipmentId]);
+
+  const handleCreateTestProduct = useCallback(async (): Promise<void> => {
+    try {
+      setPlacementSaving(true);
+      setPlacementFeedback(null);
+      const r = await api.post<ProductBrief>('/products/create-test/');
+      const p = r.data;
+      setPlacementProducts((prev) =>
+        [...prev, p].sort((a, b) => a.name.localeCompare(b.name, 'ru')),
+      );
+      setPlacementProductId(String(p.id));
+      setPlacementFeedback({ type: 'ok', text: 'Тестовый товар создан.' });
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      const detail = ax.response?.data?.detail;
+      setPlacementFeedback({
+        type: 'err',
+        text: typeof detail === 'string' ? detail : 'Не удалось создать тестовый товар.',
+      });
+    } finally {
+      setPlacementSaving(false);
+    }
+  }, []);
+
+  const handleAssignPlacementTask = useCallback(async (): Promise<void> => {
+    const eqId = selectedEquipmentIdRef.current;
+    const pid = Number(placementProductId);
+    if (!eqId) {
+      setPlacementFeedback({ type: 'err', text: 'Не выбрано оборудование.' });
+      return;
+    }
+    if (!pid || Number.isNaN(pid)) {
+      setPlacementFeedback({ type: 'err', text: 'Выберите товар из списка.' });
+      return;
+    }
+    const qty = Math.max(1, Math.floor(placementQty));
+    try {
+      setPlacementSaving(true);
+      setPlacementFeedback(null);
+      await api.post('/placement-tasks/', {
+        product: pid,
+        equipment: eqId,
+        quantity: qty,
+      });
+      setPlacementFeedback({ type: 'ok', text: 'Задача назначена.' });
+      setPlacementQty(1);
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      const detail = ax.response?.data?.detail;
+      setPlacementFeedback({
+        type: 'err',
+        text: typeof detail === 'string' ? detail : 'Не удалось назначить задачу.',
+      });
+    } finally {
+      setPlacementSaving(false);
+    }
+  }, [placementProductId, placementQty]);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
       const target = e.target;
       if (
@@ -983,8 +1100,8 @@ function StoreMap() {
       </div>
 
       {isModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 backdrop-blur-sm p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
             <h3 className="mb-4 text-lg font-semibold text-slate-100">
               {modalMode === 'create' ? 'Новое оборудование' : 'Параметры оборудования'}
             </h3>
@@ -1118,6 +1235,87 @@ function StoreMap() {
                 </select>
               </label>
             </div>
+
+            {modalMode === 'edit' && selectedEquipmentId ? (
+              <div className="mt-6 border-t border-slate-600 pt-5">
+                <h4 className="mb-3 text-sm font-semibold text-slate-200">
+                  Задачи на выкладку
+                </h4>
+                <p className="mb-3 text-xs text-slate-400">
+                  Назначьте работнику перенос товара на это оборудование (торговый зал).
+                </p>
+                {placementFeedback ? (
+                  <p
+                    className={`mb-3 rounded-md border px-3 py-2 text-xs ${
+                      placementFeedback.type === 'ok'
+                        ? 'border-emerald-600/50 bg-emerald-950/40 text-emerald-100'
+                        : 'border-amber-600/50 bg-amber-950/30 text-amber-100'
+                    }`}
+                  >
+                    {placementFeedback.text}
+                  </p>
+                ) : null}
+                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                  <label className="block min-w-0 flex-1 text-sm text-slate-300">
+                    Товар
+                    <select
+                      value={placementProductId}
+                      onChange={(ev) => setPlacementProductId(ev.target.value)}
+                      disabled={placementLoading || placementProducts.length === 0}
+                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2.5 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
+                    >
+                      {placementProducts.length === 0 ? (
+                        <option value="">Нет товаров в базе</option>
+                      ) : (
+                        placementProducts.map((p) => (
+                          <option key={p.id} value={String(p.id)}>
+                            {p.name} ({p.sku})
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  <label className="block w-full text-sm text-slate-300 sm:w-28">
+                    Кол-во
+                    <input
+                      type="number"
+                      min={1}
+                      value={placementQty}
+                      onChange={(ev) =>
+                        setPlacementQty(Math.max(1, Number(ev.target.value) || 1))
+                      }
+                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2.5 text-slate-100 outline-none focus:border-emerald-500"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                  <button
+                    type="button"
+                    disabled={placementSaving || placementLoading}
+                    onClick={() => void handleCreateTestProduct()}
+                    className="rounded-md border border-slate-500 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-slate-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Создать тестовый товар
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      placementSaving ||
+                      placementLoading ||
+                      placementProducts.length === 0 ||
+                      !placementProductId
+                    }
+                    onClick={() => void handleAssignPlacementTask()}
+                    className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {placementSaving ? 'Отправка…' : 'Назначить задачу'}
+                  </button>
+                </div>
+                {placementLoading ? (
+                  <p className="mt-2 text-xs text-slate-500">Загрузка товаров…</p>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="mt-6 flex items-center justify-end gap-3">
               {modalMode === 'edit' ? (

@@ -611,6 +611,51 @@ class Equipment(models.Model):
         return f"{self.name} — {self.zone}"
 
 
+class PlacementTask(models.Model):
+    """Задача на выкладку товара в указанное оборудование торгового зала."""
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Ожидает"
+        COMPLETED = "COMPLETED", "Выполнена"
+
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="placement_tasks",
+        verbose_name="Товар",
+        help_text="Товар, который нужно выложить.",
+    )
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.CASCADE,
+        related_name="placement_tasks",
+        verbose_name="Оборудование",
+        help_text="Стеллаж, холодильник и т.п., куда нужно отнести товар.",
+    )
+    quantity = models.PositiveIntegerField(
+        verbose_name="Количество",
+        help_text="Сколько единиц товара выложить.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        verbose_name="Статус",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создана",
+    )
+
+    class Meta:
+        verbose_name = "Задача на выкладку"
+        verbose_name_plural = "Задачи на выкладку"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.product} → {self.equipment.name} ({self.quantity} шт., {self.status})"
+
+
 class Shelf(models.Model):
     equipment = models.ForeignKey(
         Equipment,

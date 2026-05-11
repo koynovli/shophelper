@@ -1,3 +1,5 @@
+import random
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -7,16 +9,33 @@ from django.utils.dateparse import parse_date
 from django_filters import rest_framework as filters
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from shophelper.utils import parse_data_matrix
 
-from .models import Equipment, Inventory, Product, ProductBatch, Shelf, SupplyOrder, SupplyOrderItem, Zone
+from .models import (
+    Category,
+    Equipment,
+    Inventory,
+    PlacementTask,
+    Product,
+    ProductBatch,
+    Shelf,
+    SupplyOrder,
+    SupplyOrderItem,
+    User,
+    Zone,
+)
 from .serializers import (
     EquipmentSerializer,
     InventorySerializer,
+    PlacementTaskCreateSerializer,
+    PlacementTaskReadSerializer,
+    PlacementTaskUpdateSerializer,
     ProductBatchSerializer,
+    ProductBriefSerializer,
     ProductSerializer,
     ShelfSerializer,
     SupplyOrderSerializer,
@@ -25,6 +44,9 @@ from .serializers import (
 
 
 class ScanCodeView(APIView):
+    """Сканирование маркировки: доступ без JWT (терминалы / внешние клиенты)."""
+
+    permission_classes = [AllowAny]
     """
     Принимает сырую строку со сканера маркировки, парсит GS1 Data Matrix,
     ищет товар по GTIN и активную партию по серийному номеру (AI 21).
@@ -362,3 +384,75 @@ class InventoryViewSet(viewsets.ModelViewSet):
             )
 
         return Response(report, status=status.HTTP_200_OK)
+
+
+class ProductViewSet(viewsets.ReadOnlyModelViewSet):
+    """Список товаров для выбора в задачах на выкладку; тестовая запись — только админ."""
+
+    queryset = Product.objects.select_related("category").order_by("name")
+    serializer_class = ProductBriefSerializer
+
+    @action(detail=False, methods=["post"], url_path="create-test")
+    def create_test(self, request):
+        if getattr(request.user, "role", None) != User.Role.ADMIN:
+            return Response(
+                {"detail": "Создание тестового товара доступно только администратору."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        category, _ = Category.objects.get_or_create(name="Служебная категория (выкладка)")
+        suffix = uuid.uuid4().hex[:10]
+        sku = f"TEST-PL-{suffix}"
+        product = Product.objects.create(
+            name=f"Тестовый товар ({suffix})",
+            sku=sku,
+            gtin=None,
+            category=category,
+            price=Decimal("1.00"),
+            width=round(random.uniform(50.0, 100.0), 1),
+            height=round(random.uniform(50.0, 200.0), 1),
+            depth=round(random.uniform(40.0, 80.0), 1),
+            weight=round(random.uniform(100.0, 1000.0), 1),
+            is_marked=False,
+        )
+        return Response(
+            ProductBriefSerializer(product).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PlacementTaskFilter(filters.FilterSet):
+    class Meta:
+        model = PlacementTask
+        fields = ("status", "equipment")
+
+
+class PlacementTaskViewSet(viewsets.ModelViewSet):
+    """Задачи на выкладку: создание по ID товара и оборудования; чтение — вложенные имена."""
+
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    queryset = PlacementTask.objects.select_related("product", "equipment").all()
+    permission_classes = [IsAuthenticated]
+    filterset_class = PlacementTaskFilter
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return PlacementTaskCreateSerializer
+        if self.action in ("partial_update", "update"):
+            return PlacementTaskUpdateSerializer
+        return PlacementTaskReadSerializer
+
+    def create(self, request, *args, **kwargs):
+        if getattr(request.user, "role", None) != User.Role.ADMIN:
+            return Response(
+                {"detail": "Назначать задачи может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if getattr(request.user, "role", None) != User.Role.ADMIN:
+            return Response(
+                {"detail": "Удалять задачи может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().destroy(request, *args, **kwargs)

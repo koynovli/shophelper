@@ -8,6 +8,7 @@ from .models import (
     Equipment,
     Inventory,
     Placement,
+    PlacementTask,
     PlanogramEquipment,
     Product,
     ProductBatch,
@@ -198,6 +199,14 @@ class ShelfInline(admin.TabularInline):
     model = Shelf
     extra = 0
     fields = ("level", "width", "height", "depth", "capacity_notes")
+
+
+@admin.register(PlacementTask)
+class PlacementTaskAdmin(admin.ModelAdmin):
+    list_display = ("id", "product", "equipment", "quantity", "status", "created_at")
+    list_filter = ("status", "equipment__zone__store")
+    search_fields = ("product__name", "product__sku", "equipment__name")
+    autocomplete_fields = ("product", "equipment")
 
 
 @admin.register(Equipment)

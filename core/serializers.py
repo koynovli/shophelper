@@ -4,6 +4,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .models import (
     Equipment,
     Inventory,
+    PlacementTask,
     Product,
     ProductBatch,
     Shelf,
@@ -19,6 +20,56 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = "__all__"
+
+
+class ProductBriefSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product
+        fields = ("id", "name", "sku")
+
+
+class EquipmentBriefSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Equipment
+        fields = ("id", "name")
+
+
+class PlacementTaskReadSerializer(serializers.ModelSerializer):
+    product = ProductBriefSerializer(read_only=True)
+    equipment = EquipmentBriefSerializer(read_only=True)
+
+    class Meta:
+        model = PlacementTask
+        fields = ("id", "product", "equipment", "quantity", "status", "created_at")
+
+
+class PlacementTaskCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlacementTask
+        fields = ("product", "equipment", "quantity")
+
+    def validate_quantity(self, value: int) -> int:
+        if value < 1:
+            raise serializers.ValidationError("Количество должно быть не меньше 1.")
+        return value
+
+
+class PlacementTaskUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlacementTask
+        fields = ("status",)
+
+    def validate_status(self, value: str) -> str:
+        if value != PlacementTask.Status.COMPLETED:
+            raise serializers.ValidationError(
+                "Допустимо только завершение задачи: статус COMPLETED."
+            )
+        return value
+
+    def validate(self, attrs):
+        if self.instance and self.instance.status == PlacementTask.Status.COMPLETED:
+            raise serializers.ValidationError("Задача уже выполнена.")
+        return attrs
 
 
 class SupplierSerializer(serializers.ModelSerializer):
