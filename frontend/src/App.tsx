@@ -7,7 +7,7 @@ import { ProtectedRoute } from './auth/ProtectedRoute';
 import { useAuth } from './auth/AuthContext';
 import StoreMap from './components/StoreMap';
 import { MapEditModeProvider } from './map/MapEditModeContext';
-import { MapModeToolbar } from './map/MapModeToolbar';
+import { MapModeToolbar } from './components/MapModeToolbar';
 import { EmployeeDashboard } from './pages/EmployeeDashboard';
 import { LoginPage } from './pages/LoginPage';
 import { NoAccess } from './pages/NoAccess';
