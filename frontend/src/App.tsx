@@ -6,6 +6,8 @@ import api from './api';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { useAuth } from './auth/AuthContext';
 import StoreMap from './components/StoreMap';
+import { MapEditModeProvider } from './map/MapEditModeContext';
+import { MapModeToolbar } from './map/MapModeToolbar';
 import { EmployeeDashboard } from './pages/EmployeeDashboard';
 import { LoginPage } from './pages/LoginPage';
 import { NoAccess } from './pages/NoAccess';
@@ -103,16 +105,17 @@ function App() {
     return <Navigate to={user.role === 'admin' ? '/admin' : '/employee'} replace />;
   };
 
-  const AdminShell = (): React.ReactElement => (
+  const AdminShellInner = (): React.ReactElement => {
+    return (
     <div className="min-h-screen bg-slate-950 px-4 py-8 font-sans text-slate-200 sm:px-6 lg:px-8">
-      <header className="mx-auto mb-8 flex w-full max-w-5xl items-center justify-between border-b border-slate-800 pb-6">
+      <header className="mx-auto mb-8 flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-6">
         <div className="flex items-center gap-3">
           <ShoppingCart className="h-8 w-8 text-emerald-400" />
           <h1 className="text-2xl font-bold tracking-tight text-white">
             ShopHelper UI
           </h1>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {user ? (
             <span className="hidden text-sm text-slate-400 sm:inline">
               {user.username}
@@ -217,11 +220,19 @@ function App() {
           </>
         ) : (
           <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-4 shadow-2xl">
+            <MapModeToolbar className="mb-4" />
             <StoreMap />
           </div>
         )}
       </main>
     </div>
+    );
+  };
+
+  const AdminShell = (): React.ReactElement => (
+    <MapEditModeProvider>
+      <AdminShellInner />
+    </MapEditModeProvider>
   );
 
   return (

@@ -611,13 +611,81 @@ class Equipment(models.Model):
         return f"{self.name} — {self.zone}"
 
 
+class Planogram(models.Model):
+    """Планограмма торгового зала: целевое количество SKU на конкретном оборудовании."""
+
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.CASCADE,
+        related_name="planograms",
+        verbose_name="Оборудование",
+        help_text="Объект плана зала (стеллаж, холодильник и т.п.).",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="floor_planograms",
+        verbose_name="Товар",
+        help_text="Товар, который должен быть представлен на этом оборудовании.",
+    )
+    target_quantity = models.PositiveIntegerField(
+        verbose_name="Целевое количество",
+        help_text="Сколько единиц товара должно находиться на полке в идеале.",
+    )
+
+    class Meta:
+        verbose_name = "Планограмма (зал)"
+        verbose_name_plural = "Планограммы (зал)"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("equipment", "product"),
+                name="uniq_planogram_equipment_product",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.equipment.name}: {self.product.name} → {self.target_quantity} шт."
+
+
+class StockItem(models.Model):
+    """Агрегированный остаток на складе магазина по товару (для сопоставления с планограммой)."""
+
+    product = models.OneToOneField(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="stock_item",
+        verbose_name="Товар",
+    )
+    quantity = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество на складе",
+        help_text="Сколько единиц доступно для выкладки со склада.",
+    )
+
+    class Meta:
+        verbose_name = "Остаток на складе"
+        verbose_name_plural = "Остатки на складе"
+
+    def __str__(self) -> str:
+        return f"{self.product.sku}: {self.quantity} шт."
+
+
 class PlacementTask(models.Model):
-    """Задача на выкладку товара в указанное оборудование торгового зала."""
+    """Задача на выкладку: создаётся автоматически из планограммы и остатка на складе."""
 
     class Status(models.TextChoices):
         PENDING = "PENDING", "Ожидает"
         COMPLETED = "COMPLETED", "Выполнена"
 
+    planogram = models.ForeignKey(
+        Planogram,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="placement_tasks",
+        verbose_name="Планограмма",
+        help_text="Источник задачи; пусто для устаревших записей до введения планограмм.",
+    )
     product = models.ForeignKey(
         Product,
         on_delete=models.CASCADE,
@@ -651,6 +719,13 @@ class PlacementTask(models.Model):
         verbose_name = "Задача на выкладку"
         verbose_name_plural = "Задачи на выкладку"
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("planogram",),
+                condition=models.Q(status="PENDING"),
+                name="uniq_placementtask_pending_planogram",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.product} → {self.equipment.name} ({self.quantity} шт., {self.status})"

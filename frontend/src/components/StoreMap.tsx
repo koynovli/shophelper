@@ -26,6 +26,7 @@ import {
 
 import api from '../api';
 import type { AxiosError } from 'axios';
+import { useMapEditMode } from '../map/MapEditModeContext';
 import type { FloorEquipment, FloorEquipmentType, FloorZone } from '../types/floorPlan';
 import { normalizeFloorEquipment } from '../types/floorPlan';
 import {
@@ -78,6 +79,22 @@ type ProductBrief = {
   sku: string;
 };
 
+type PlanogramRow = {
+  id: number;
+  equipment: { id: number; name: string };
+  product: { id: number; name: string; sku: string };
+  target_quantity: number;
+  stock_quantity: number;
+};
+
+type MerchTaskRow = {
+  id: number;
+  quantity: number;
+  status: string;
+  product: { id: number; name: string; sku: string };
+  equipment: { id: number; name: string };
+};
+
 type WheelConfig = {
   step?: number;
   smoothStep?: number;
@@ -90,6 +107,17 @@ type TransformWrapperExtras = {
 
 function cloneZones(zones: FloorZone[]): FloorZone[] {
   return JSON.parse(JSON.stringify(zones)) as FloorZone[];
+}
+
+function extractApiList<T>(data: unknown): T[] {
+  if (Array.isArray(data)) {
+    return data as T[];
+  }
+  if (data && typeof data === 'object' && 'results' in data) {
+    const r = (data as { results?: T[] }).results;
+    return Array.isArray(r) ? r : [];
+  }
+  return [];
 }
 
 function MapZoomToolbar() {
@@ -131,6 +159,7 @@ function MapZoomToolbar() {
 }
 
 function StoreMap() {
+  const { isEditMode } = useMapEditMode();
   const [zones, setZones] = useState<FloorZone[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
@@ -150,12 +179,17 @@ function StoreMap() {
     shelfCount: 4,
   });
   const [isSaving, setIsSaving] = useState(false);
-  const [placementProducts, setPlacementProducts] = useState<ProductBrief[]>([]);
-  const [placementProductId, setPlacementProductId] = useState<string>('');
-  const [placementQty, setPlacementQty] = useState<number>(1);
-  const [placementLoading, setPlacementLoading] = useState(false);
-  const [placementSaving, setPlacementSaving] = useState(false);
-  const [placementFeedback, setPlacementFeedback] = useState<{
+  const [merchOpen, setMerchOpen] = useState(false);
+  const [merchEquipmentId, setMerchEquipmentId] = useState<number | null>(null);
+  const [merchEquipmentName, setMerchEquipmentName] = useState('');
+  const [merchPlanograms, setMerchPlanograms] = useState<PlanogramRow[]>([]);
+  const [merchTasks, setMerchTasks] = useState<MerchTaskRow[]>([]);
+  const [merchProducts, setMerchProducts] = useState<ProductBrief[]>([]);
+  const [merchProductId, setMerchProductId] = useState('');
+  const [merchTargetQty, setMerchTargetQty] = useState(1);
+  const [merchLoading, setMerchLoading] = useState(false);
+  const [merchSaving, setMerchSaving] = useState(false);
+  const [merchFeedback, setMerchFeedback] = useState<{
     type: 'ok' | 'err';
     text: string;
   } | null>(null);
@@ -179,6 +213,13 @@ function StoreMap() {
   useEffect(() => {
     zonesRef.current = zones;
   }, [zones]);
+
+  useEffect(() => {
+    if (!isEditMode) {
+      setEditorMode('SELECT');
+      setDraggingItem(null);
+    }
+  }, [isEditMode]);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {
@@ -447,17 +488,23 @@ function StoreMap() {
     const xCm = snapCoordPx(offsetX) / PX_PER_CM;
     const yCm = snapCoordPx(offsetY) / PX_PER_CM;
     if (isCreateMode) {
+      if (!isEditMode) {
+        return;
+      }
       openCreateModalAt(xCm, yCm);
       return;
     }
     if (isDuplicateMode) {
+      if (!isEditMode) {
+        return;
+      }
       void createFromDuplicateAt(xCm, yCm);
       return;
     }
   };
 
   const handleMapPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
-    if (!isSelectMode) {
+    if (!isEditMode || !isSelectMode) {
       return;
     }
     if (draggingItem === null) {
@@ -735,106 +782,132 @@ function StoreMap() {
     });
   }, [isModalOpen, isNameManual, modalMode, newEquipmentForm.type]);
 
-  useEffect(() => {
-    if (!isModalOpen || modalMode !== 'edit' || !selectedEquipmentId) {
+  const fetchMerchData = useCallback(async (equipmentId: number): Promise<void> => {
+    setMerchLoading(true);
+    setMerchFeedback(null);
+    try {
+      const [pgRes, taskRes, prodRes] = await Promise.all([
+        api.get('/planograms/', { params: { equipment: equipmentId } }),
+        api.get('/placement-tasks/', { params: { equipment: equipmentId, status: 'PENDING' } }),
+        api.get('/products/'),
+      ]);
+      const pgList = extractApiList<PlanogramRow>(pgRes.data);
+      const taskList = extractApiList<MerchTaskRow>(taskRes.data);
+      const prods = extractApiList<ProductBrief>(prodRes.data).sort((a, b) =>
+        a.name.localeCompare(b.name, 'ru'),
+      );
+      setMerchPlanograms(pgList);
+      setMerchTasks(taskList);
+      setMerchProducts(prods);
+      setMerchProductId((prev) => {
+        if (prev && prods.some((p) => String(p.id) === prev)) {
+          return prev;
+        }
+        return prods[0] ? String(prods[0].id) : '';
+      });
+    } catch {
+      setMerchFeedback({ type: 'err', text: 'Не удалось загрузить планограмму и задачи.' });
+    } finally {
+      setMerchLoading(false);
+    }
+  }, []);
+
+  const openMerchModal = useCallback(
+    (equipment: FloorEquipment): void => {
+      setMerchEquipmentId(equipment.id);
+      setMerchEquipmentName(equipment.name);
+      setMerchOpen(true);
+      setMerchTargetQty(1);
+      void fetchMerchData(equipment.id);
+    },
+    [fetchMerchData],
+  );
+
+  const handleMerchCreateTestProduct = useCallback(async (): Promise<void> => {
+    if (!merchEquipmentId) {
       return;
     }
-    let cancelled = false;
-    setPlacementFeedback(null);
-    void (async () => {
-      setPlacementLoading(true);
-      try {
-        const r = await api.get<ProductBrief[] | { results?: ProductBrief[] }>('/products/');
-        const raw = Array.isArray(r.data) ? r.data : (r.data.results ?? []);
-        if (!cancelled) {
-          setPlacementProducts(raw);
-          if (raw.length > 0) {
-            setPlacementProductId((prev) => {
-              if (prev && raw.some((p) => String(p.id) === prev)) {
-                return prev;
-              }
-              return String(raw[0].id);
-            });
-          } else {
-            setPlacementProductId('');
-          }
-        }
-      } catch {
-        if (!cancelled) {
-          setPlacementProducts([]);
-          setPlacementProductId('');
-          setPlacementFeedback({
-            type: 'err',
-            text: 'Не удалось загрузить список товаров.',
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setPlacementLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isModalOpen, modalMode, selectedEquipmentId]);
-
-  const handleCreateTestProduct = useCallback(async (): Promise<void> => {
     try {
-      setPlacementSaving(true);
-      setPlacementFeedback(null);
+      setMerchSaving(true);
+      setMerchFeedback(null);
       const r = await api.post<ProductBrief>('/products/create-test/');
       const p = r.data;
-      setPlacementProducts((prev) =>
+      setMerchProducts((prev) =>
         [...prev, p].sort((a, b) => a.name.localeCompare(b.name, 'ru')),
       );
-      setPlacementProductId(String(p.id));
-      setPlacementFeedback({ type: 'ok', text: 'Тестовый товар создан.' });
+      setMerchProductId(String(p.id));
+      setMerchFeedback({ type: 'ok', text: 'Тестовый товар создан.' });
+      await fetchMerchData(merchEquipmentId);
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
       const detail = ax.response?.data?.detail;
-      setPlacementFeedback({
+      setMerchFeedback({
         type: 'err',
         text: typeof detail === 'string' ? detail : 'Не удалось создать тестовый товар.',
       });
     } finally {
-      setPlacementSaving(false);
+      setMerchSaving(false);
     }
-  }, []);
+  }, [fetchMerchData, merchEquipmentId]);
 
-  const handleAssignPlacementTask = useCallback(async (): Promise<void> => {
-    const eqId = selectedEquipmentIdRef.current;
-    const pid = Number(placementProductId);
-    if (!eqId) {
-      setPlacementFeedback({ type: 'err', text: 'Не выбрано оборудование.' });
+  const handleAddPlanogram = useCallback(async (): Promise<void> => {
+    if (!merchEquipmentId) {
+      setMerchFeedback({ type: 'err', text: 'Не выбрано оборудование.' });
       return;
     }
+    const pid = Number(merchProductId);
     if (!pid || Number.isNaN(pid)) {
-      setPlacementFeedback({ type: 'err', text: 'Выберите товар из списка.' });
+      setMerchFeedback({ type: 'err', text: 'Выберите товар.' });
       return;
     }
-    const qty = Math.max(1, Math.floor(placementQty));
+    const tq = Math.max(1, Math.floor(merchTargetQty));
     try {
-      setPlacementSaving(true);
-      setPlacementFeedback(null);
-      await api.post('/placement-tasks/', {
+      setMerchSaving(true);
+      setMerchFeedback(null);
+      await api.post('/planograms/', {
+        equipment: merchEquipmentId,
         product: pid,
-        equipment: eqId,
-        quantity: qty,
+        target_quantity: tq,
       });
-      setPlacementFeedback({ type: 'ok', text: 'Задача назначена.' });
-      setPlacementQty(1);
+      setMerchFeedback({ type: 'ok', text: 'Позиция планограммы добавлена.' });
+      setMerchTargetQty(1);
+      await fetchMerchData(merchEquipmentId);
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
-      const detail = ax.response?.data?.detail;
-      setPlacementFeedback({
+      const d = ax.response?.data?.detail;
+      setMerchFeedback({
         type: 'err',
-        text: typeof detail === 'string' ? detail : 'Не удалось назначить задачу.',
+        text:
+          typeof d === 'string'
+            ? d
+            : 'Не удалось добавить (возможно, товар уже в планограмме этой полки).',
       });
     } finally {
-      setPlacementSaving(false);
+      setMerchSaving(false);
     }
-  }, [placementProductId, placementQty]);
+  }, [fetchMerchData, merchEquipmentId, merchProductId, merchTargetQty]);
+
+  const handleDeletePlanogram = useCallback(
+    async (planogramId: number): Promise<void> => {
+      if (!merchEquipmentId) {
+        return;
+      }
+      if (!window.confirm('Удалить позицию из планограммы?')) {
+        return;
+      }
+      try {
+        setMerchSaving(true);
+        await api.delete(`/planograms/${planogramId}/`);
+        setMerchFeedback({ type: 'ok', text: 'Удалено из планограммы.' });
+        await fetchMerchData(merchEquipmentId);
+      } catch {
+        setMerchFeedback({ type: 'err', text: 'Не удалось удалить.' });
+      } finally {
+        setMerchSaving(false);
+      }
+    },
+    [fetchMerchData, merchEquipmentId],
+  );
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
@@ -850,17 +923,26 @@ function StoreMap() {
       const mod = e.ctrlKey || e.metaKey;
 
       if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        if (!isEditMode) {
+          return;
+        }
         e.preventDefault();
         undo();
         return;
       }
       if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+        if (!isEditMode) {
+          return;
+        }
         e.preventDefault();
         redo();
         return;
       }
       // Физические KeyA / KeyD — поворот при любой раскладке клавиатуры (RU/EN)
       if (!mod && (e.code === 'KeyA' || e.code === 'KeyD')) {
+        if (!isEditMode) {
+          return;
+        }
         e.preventDefault();
         const delta =
           e.code === 'KeyA'
@@ -874,6 +956,9 @@ function StoreMap() {
         return;
       }
       if (!mod && e.code === 'KeyE') {
+        if (!isEditMode) {
+          return;
+        }
         e.preventDefault();
         setEditorMode('CREATE');
       }
@@ -881,7 +966,7 @@ function StoreMap() {
 
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [redo, rotateSelected, undo, setEditorMode]);
+  }, [isEditMode, redo, rotateSelected, undo, setEditorMode]);
 
   if (loading) {
     return (
@@ -926,6 +1011,7 @@ function StoreMap() {
             type="number"
             min={1}
             step={0.5}
+            disabled={!isEditMode}
             value={dimensions.width}
             onChange={(ev) =>
               setDimensions((d) => ({
@@ -933,7 +1019,7 @@ function StoreMap() {
                 width: Math.max(1, Number(ev.target.value) || 1),
               }))
             }
-            className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
+            className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           />
         </label>
         <label className="flex items-center gap-2">
@@ -942,6 +1028,7 @@ function StoreMap() {
             type="number"
             min={1}
             step={0.5}
+            disabled={!isEditMode}
             value={dimensions.height}
             onChange={(ev) =>
               setDimensions((d) => ({
@@ -949,7 +1036,7 @@ function StoreMap() {
                 height: Math.max(1, Number(ev.target.value) || 1),
               }))
             }
-            className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
+            className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           />
         </label>
       </div>
@@ -973,11 +1060,12 @@ function StoreMap() {
         <button
           type="button"
           onClick={() => setEditorMode('CREATE')}
+          disabled={!isEditMode}
           className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
             isCreateMode
               ? 'border-emerald-500/70 bg-emerald-500/15 text-emerald-200'
               : 'border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500'
-          }`}
+          } disabled:cursor-not-allowed disabled:opacity-50`}
           title="Создать оборудование (E)"
           aria-label="Создать оборудование (E)"
         >
@@ -987,7 +1075,7 @@ function StoreMap() {
         <button
           type="button"
           onClick={() => setEditorMode('DUPLICATE')}
-          disabled={!duplicateSourceRef.current}
+          disabled={!isEditMode || !duplicateSourceRef.current}
           className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
             isDuplicateMode
               ? 'border-violet-500/70 bg-violet-500/15 text-violet-200'
@@ -1016,7 +1104,7 @@ function StoreMap() {
           <Warehouse className="h-3.5 w-3.5 text-amber-300" />
           Объектов: {allEquipment.length}
         </span>
-        {selectedEquipment ? (
+        {selectedEquipment && isEditMode ? (
           <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
             <Pencil className="h-3.5 w-3.5 text-sky-300" />
             Поворот: {Math.round(selectedEquipment.rotation ?? 0)}°
@@ -1043,7 +1131,9 @@ function StoreMap() {
               <div
                 ref={mapBoardRef}
                 role="presentation"
-                className={`relative h-full w-full rounded-lg ring-1 ring-slate-600/70 ${isCreateMode || isDuplicateMode ? 'cursor-crosshair' : ''}`}
+                className={`relative h-full w-full rounded-lg ring-1 ring-slate-600/70 ${
+                  isEditMode && (isCreateMode || isDuplicateMode) ? 'cursor-crosshair' : ''
+                }`}
                 style={{
                   imageRendering: 'pixelated',
                   ...gridStyle,
@@ -1061,11 +1151,12 @@ function StoreMap() {
                       zoneColorHex={zone.color}
                       pxPerCm={PX_PER_CM}
                       editMode={isSelectMode}
+                      layoutLocked={!isEditMode}
                       selected={selectedEquipmentId === eq.id}
                       dragging={draggingItem === eq.id}
                       collision={collisionIds.has(eq.id)}
                       onPointerDown={(ev) => {
-                        if (!isSelectMode) {
+                        if (!isEditMode || !isSelectMode) {
                           return;
                         }
                         ev.stopPropagation();
@@ -1079,7 +1170,11 @@ function StoreMap() {
                       }}
                       onDoubleClick={(ev) => {
                         ev.stopPropagation();
-                        openEditModal(eq);
+                        if (isEditMode) {
+                          openEditModal(eq);
+                        } else {
+                          openMerchModal(eq);
+                        }
                       }}
                     />
                   )),
@@ -1091,9 +1186,14 @@ function StoreMap() {
 
         <div className="pointer-events-none absolute bottom-3 left-4 z-20 max-w-[min(100%,28rem)] rounded-lg border border-slate-700/80 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-400 backdrop-blur-sm">
           Колёсико — зум · перетаскивание — панорама
-          {isSelectMode || isCreateMode || isDuplicateMode ? (
+          {isEditMode && (isSelectMode || isCreateMode || isDuplicateMode) ? (
             <span className="mt-1 block text-amber-200/90">
-              E — включить CREATE · A/D (+ Shift) — поворот · Double click — параметры · Ctrl+Z / Ctrl+Y
+              E — CREATE · A/D — поворот · Double click — параметры мебели · Ctrl+Z / Ctrl+Y
+            </span>
+          ) : null}
+          {!isEditMode ? (
+            <span className="mt-1 block text-sky-200/90">
+              Режим мерчандайзинга: double click — планограмма и задачи · перетаскивание отключено
             </span>
           ) : null}
         </div>
@@ -1236,93 +1336,13 @@ function StoreMap() {
               </label>
             </div>
 
-            {modalMode === 'edit' && selectedEquipmentId ? (
-              <div className="mt-6 border-t border-slate-600 pt-5">
-                <h4 className="mb-3 text-sm font-semibold text-slate-200">
-                  Задачи на выкладку
-                </h4>
-                <p className="mb-3 text-xs text-slate-400">
-                  Назначьте работнику перенос товара на это оборудование (торговый зал).
-                </p>
-                {placementFeedback ? (
-                  <p
-                    className={`mb-3 rounded-md border px-3 py-2 text-xs ${
-                      placementFeedback.type === 'ok'
-                        ? 'border-emerald-600/50 bg-emerald-950/40 text-emerald-100'
-                        : 'border-amber-600/50 bg-amber-950/30 text-amber-100'
-                    }`}
-                  >
-                    {placementFeedback.text}
-                  </p>
-                ) : null}
-                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-                  <label className="block min-w-0 flex-1 text-sm text-slate-300">
-                    Товар
-                    <select
-                      value={placementProductId}
-                      onChange={(ev) => setPlacementProductId(ev.target.value)}
-                      disabled={placementLoading || placementProducts.length === 0}
-                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2.5 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
-                    >
-                      {placementProducts.length === 0 ? (
-                        <option value="">Нет товаров в базе</option>
-                      ) : (
-                        placementProducts.map((p) => (
-                          <option key={p.id} value={String(p.id)}>
-                            {p.name} ({p.sku})
-                          </option>
-                        ))
-                      )}
-                    </select>
-                  </label>
-                  <label className="block w-full text-sm text-slate-300 sm:w-28">
-                    Кол-во
-                    <input
-                      type="number"
-                      min={1}
-                      value={placementQty}
-                      onChange={(ev) =>
-                        setPlacementQty(Math.max(1, Number(ev.target.value) || 1))
-                      }
-                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2.5 text-slate-100 outline-none focus:border-emerald-500"
-                    />
-                  </label>
-                </div>
-                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                  <button
-                    type="button"
-                    disabled={placementSaving || placementLoading}
-                    onClick={() => void handleCreateTestProduct()}
-                    className="rounded-md border border-slate-500 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-slate-400 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Создать тестовый товар
-                  </button>
-                  <button
-                    type="button"
-                    disabled={
-                      placementSaving ||
-                      placementLoading ||
-                      placementProducts.length === 0 ||
-                      !placementProductId
-                    }
-                    onClick={() => void handleAssignPlacementTask()}
-                    className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {placementSaving ? 'Отправка…' : 'Назначить задачу'}
-                  </button>
-                </div>
-                {placementLoading ? (
-                  <p className="mt-2 text-xs text-slate-500">Загрузка товаров…</p>
-                ) : null}
-              </div>
-            ) : null}
-
             <div className="mt-6 flex items-center justify-end gap-3">
               {modalMode === 'edit' ? (
                 <button
                   type="button"
+                  disabled={!isEditMode}
                   onClick={activateDuplicateModeFromSelected}
-                  className="mr-auto rounded-md border border-violet-500/70 bg-violet-600/20 px-4 py-2 text-sm font-medium text-violet-100 transition hover:bg-violet-500/30"
+                  className="mr-auto rounded-md border border-violet-500/70 bg-violet-600/20 px-4 py-2 text-sm font-medium text-violet-100 transition hover:bg-violet-500/30 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Дублировать
                 </button>
@@ -1330,8 +1350,9 @@ function StoreMap() {
               {modalMode === 'edit' ? (
                 <button
                   type="button"
+                  disabled={!isEditMode}
                   onClick={() => void deleteSelectedEquipment()}
-                  className="rounded-md border border-red-500/70 bg-red-600/15 px-4 py-2 text-sm font-medium text-red-100 transition hover:bg-red-500/25"
+                  className="rounded-md border border-red-500/70 bg-red-600/15 px-4 py-2 text-sm font-medium text-red-100 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Удалить
                 </button>
@@ -1348,11 +1369,151 @@ function StoreMap() {
               </button>
               <button
                 type="button"
-                disabled={isSaving}
+                disabled={isSaving || (modalMode === 'edit' && !isEditMode)}
                 onClick={handleSaveEquipment}
                 className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isSaving ? 'Сохранение...' : modalMode === 'create' ? 'Создать' : 'Сохранить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {merchOpen && merchEquipmentId ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 backdrop-blur-sm p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
+            <h3 className="mb-1 text-lg font-semibold text-slate-100">Планограмма и задачи</h3>
+            <p className="mb-4 text-sm text-slate-400">{merchEquipmentName}</p>
+
+            {merchFeedback ? (
+              <p
+                className={`mb-3 rounded-md border px-3 py-2 text-xs ${
+                  merchFeedback.type === 'ok'
+                    ? 'border-emerald-600/50 bg-emerald-950/40 text-emerald-100'
+                    : 'border-amber-600/50 bg-amber-950/30 text-amber-100'
+                }`}
+              >
+                {merchFeedback.text}
+              </p>
+            ) : null}
+
+            <div className="mb-6 border-b border-slate-600 pb-5">
+              <h4 className="mb-2 text-sm font-semibold text-slate-200">Планограмма полки</h4>
+              {merchLoading ? (
+                <p className="text-xs text-slate-500">Загрузка…</p>
+              ) : merchPlanograms.length === 0 ? (
+                <p className="text-xs text-slate-500">Пока нет позиций. Добавьте товар и целевое количество.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {merchPlanograms.map((row) => (
+                    <li
+                      key={row.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-600 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <span>
+                        <span className="font-medium text-slate-100">{row.product.name}</span>
+                        <span className="text-slate-500"> — цель {row.target_quantity} шт.</span>
+                        <span className="block text-xs text-slate-500">
+                          На складе: {row.stock_quantity} шт.
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={merchSaving}
+                        onClick={() => void handleDeletePlanogram(row.id)}
+                        className="shrink-0 rounded border border-rose-500/50 px-2 py-1 text-xs text-rose-100 hover:bg-rose-950/40 disabled:opacity-50"
+                      >
+                        Удалить
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                <label className="min-w-0 flex-1 text-sm text-slate-300">
+                  Товар
+                  <select
+                    value={merchProductId}
+                    onChange={(ev) => setMerchProductId(ev.target.value)}
+                    disabled={merchLoading || merchProducts.length === 0}
+                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
+                  >
+                    {merchProducts.length === 0 ? (
+                      <option value="">Нет товаров</option>
+                    ) : (
+                      merchProducts.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.name} ({p.sku})
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+                <label className="w-full text-sm text-slate-300 sm:w-28">
+                  Цель, шт.
+                  <input
+                    type="number"
+                    min={1}
+                    value={merchTargetQty}
+                    onChange={(ev) =>
+                      setMerchTargetQty(Math.max(1, Number(ev.target.value) || 1))
+                    }
+                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={merchSaving || merchLoading || !merchProductId}
+                  onClick={() => void handleAddPlanogram()}
+                  className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  Добавить в планограмму
+                </button>
+                <button
+                  type="button"
+                  disabled={merchSaving}
+                  onClick={() => void handleMerchCreateTestProduct()}
+                  className="rounded-md border border-slate-500 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  Создать тестовый товар
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="mb-2 text-sm font-semibold text-slate-200">Текущие задачи выкладки</h4>
+              {merchTasks.length === 0 ? (
+                <p className="text-xs text-slate-500">Нет активных задач (ожидает подвоз — не требуется).</p>
+              ) : (
+                <ul className="space-y-2">
+                  {merchTasks.map((t) => (
+                    <li
+                      key={t.id}
+                      className="rounded-lg border border-slate-600 bg-slate-900/50 px-3 py-2 text-sm text-slate-200"
+                    >
+                      Ожидается подвоз{' '}
+                      <span className="font-semibold text-amber-100">{t.quantity} шт.</span>{' '}
+                      <span className="text-slate-100">{t.product.name}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setMerchOpen(false);
+                  setMerchEquipmentId(null);
+                  setMerchFeedback(null);
+                }}
+                className="rounded-md border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-slate-300 hover:border-slate-500"
+              >
+                Закрыть
               </button>
             </div>
           </div>

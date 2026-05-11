@@ -7,11 +7,13 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .views import (
     EquipmentViewSet,
     InventoryViewSet,
+    PlanogramViewSet,
     PlacementTaskViewSet,
     ProductBatchViewSet,
     ProductViewSet,
     ScanCodeView,
     ShelfViewSet,
+    StockItemViewSet,
     SupplyOrderViewSet,
     ZoneViewSet,
 )
@@ -26,6 +28,8 @@ router.register(r"shelves", ShelfViewSet, basename="shelf")
 router.register(r"inventory", InventoryViewSet, basename="inventory")
 router.register(r"products", ProductViewSet, basename="product")
 router.register(r"placement-tasks", PlacementTaskViewSet, basename="placementtask")
+router.register(r"planograms", PlanogramViewSet, basename="planogram")
+router.register(r"stock-items", StockItemViewSet, basename="stockitem")
 
 urlpatterns = [
     path(

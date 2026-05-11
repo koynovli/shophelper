@@ -5,9 +5,11 @@ from .models import (
     Equipment,
     Inventory,
     PlacementTask,
+    Planogram,
     Product,
     ProductBatch,
     Shelf,
+    StockItem,
     Supplier,
     SupplyOrder,
     SupplyOrderItem,
@@ -40,18 +42,7 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PlacementTask
-        fields = ("id", "product", "equipment", "quantity", "status", "created_at")
-
-
-class PlacementTaskCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PlacementTask
-        fields = ("product", "equipment", "quantity")
-
-    def validate_quantity(self, value: int) -> int:
-        if value < 1:
-            raise serializers.ValidationError("Количество должно быть не меньше 1.")
-        return value
+        fields = ("id", "planogram", "product", "equipment", "quantity", "status", "created_at")
 
 
 class PlacementTaskUpdateSerializer(serializers.ModelSerializer):
@@ -70,6 +61,48 @@ class PlacementTaskUpdateSerializer(serializers.ModelSerializer):
         if self.instance and self.instance.status == PlacementTask.Status.COMPLETED:
             raise serializers.ValidationError("Задача уже выполнена.")
         return attrs
+
+    def update(self, instance, validated_data):
+        from .placement_sync import reconcile_planogram
+
+        instance = super().update(instance, validated_data)
+        if instance.planogram_id and instance.status == PlacementTask.Status.COMPLETED:
+            reconcile_planogram(instance.planogram)
+        return instance
+
+
+class PlanogramReadSerializer(serializers.ModelSerializer):
+    product = ProductBriefSerializer(read_only=True)
+    equipment = EquipmentBriefSerializer(read_only=True)
+    stock_quantity = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Planogram
+        fields = ("id", "equipment", "product", "target_quantity", "stock_quantity")
+
+    def get_stock_quantity(self, obj: Planogram) -> int:
+        row = StockItem.objects.filter(product_id=obj.product_id).first()
+        return int(row.quantity) if row else 0
+
+
+class PlanogramWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Planogram
+        fields = ("equipment", "product", "target_quantity")
+
+    def validate_target_quantity(self, value: int) -> int:
+        if value < 1:
+            raise serializers.ValidationError("Целевое количество должно быть не меньше 1.")
+        return value
+
+
+class StockItemSerializer(serializers.ModelSerializer):
+    product_detail = ProductBriefSerializer(source="product", read_only=True)
+
+    class Meta:
+        model = StockItem
+        fields = ("id", "product", "product_detail", "quantity")
+        read_only_fields = ("id", "product_detail")
 
 
 class SupplierSerializer(serializers.ModelSerializer):

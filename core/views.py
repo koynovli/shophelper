@@ -9,7 +9,7 @@ from django.utils.dateparse import parse_date
 from django_filters import rest_framework as filters
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -20,24 +20,29 @@ from .models import (
     Equipment,
     Inventory,
     PlacementTask,
+    Planogram,
     Product,
     ProductBatch,
     Shelf,
+    StockItem,
     SupplyOrder,
     SupplyOrderItem,
     User,
     Zone,
 )
+from .permissions import IsRoleAdmin
 from .serializers import (
     EquipmentSerializer,
     InventorySerializer,
-    PlacementTaskCreateSerializer,
+    PlanogramReadSerializer,
+    PlanogramWriteSerializer,
     PlacementTaskReadSerializer,
     PlacementTaskUpdateSerializer,
     ProductBatchSerializer,
     ProductBriefSerializer,
     ProductSerializer,
     ShelfSerializer,
+    StockItemSerializer,
     SupplyOrderSerializer,
     ZoneSerializer,
 )
@@ -307,6 +312,11 @@ class ZoneViewSet(viewsets.ModelViewSet):
     serializer_class = ZoneSerializer
     filterset_class = ZoneFilter
 
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRoleAdmin()]
+
 
 class EquipmentViewSet(viewsets.ModelViewSet):
     queryset = Equipment.objects.select_related("zone", "zone__store").prefetch_related(
@@ -315,10 +325,20 @@ class EquipmentViewSet(viewsets.ModelViewSet):
     serializer_class = EquipmentSerializer
     filterset_class = EquipmentFilter
 
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRoleAdmin()]
+
 
 class ShelfViewSet(viewsets.ModelViewSet):
     queryset = Shelf.objects.select_related("equipment", "equipment__zone")
     serializer_class = ShelfSerializer
+
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRoleAdmin()]
 
 
 class InventoryViewSet(viewsets.ModelViewSet):
@@ -387,7 +407,7 @@ class InventoryViewSet(viewsets.ModelViewSet):
 
 
 class ProductViewSet(viewsets.ReadOnlyModelViewSet):
-    """Список товаров для выбора в задачах на выкладку; тестовая запись — только админ."""
+    """Список товаров (планограмма, мерчандайзинг); create-test — только админ."""
 
     queryset = Product.objects.select_related("category").order_by("name")
     serializer_class = ProductBriefSerializer
@@ -414,6 +434,10 @@ class ProductViewSet(viewsets.ReadOnlyModelViewSet):
             weight=round(random.uniform(100.0, 1000.0), 1),
             is_marked=False,
         )
+        StockItem.objects.update_or_create(
+            product=product,
+            defaults={"quantity": 24},
+        )
         return Response(
             ProductBriefSerializer(product).data,
             status=status.HTTP_201_CREATED,
@@ -427,27 +451,21 @@ class PlacementTaskFilter(filters.FilterSet):
 
 
 class PlacementTaskViewSet(viewsets.ModelViewSet):
-    """Задачи на выкладку: создание по ID товара и оборудования; чтение — вложенные имена."""
+    """Задачи на выкладку создаются системой из планограммы и склада; ручного POST нет."""
 
-    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
-    queryset = PlacementTask.objects.select_related("product", "equipment").all()
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+    queryset = PlacementTask.objects.select_related(
+        "product",
+        "equipment",
+        "planogram",
+    ).all()
     permission_classes = [IsAuthenticated]
     filterset_class = PlacementTaskFilter
 
     def get_serializer_class(self):
-        if self.action == "create":
-            return PlacementTaskCreateSerializer
         if self.action in ("partial_update", "update"):
             return PlacementTaskUpdateSerializer
         return PlacementTaskReadSerializer
-
-    def create(self, request, *args, **kwargs):
-        if getattr(request.user, "role", None) != User.Role.ADMIN:
-            return Response(
-                {"detail": "Назначать задачи может только администратор."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        return super().create(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         if getattr(request.user, "role", None) != User.Role.ADMIN:
@@ -456,3 +474,41 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         return super().destroy(request, *args, **kwargs)
+
+
+class PlanogramFilter(filters.FilterSet):
+    class Meta:
+        model = Planogram
+        fields = ("equipment", "product")
+
+
+class PlanogramViewSet(viewsets.ModelViewSet):
+    queryset = Planogram.objects.select_related("equipment", "product").all()
+    filterset_class = PlanogramFilter
+
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRoleAdmin()]
+
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return PlanogramWriteSerializer
+        return PlanogramReadSerializer
+
+
+class StockItemFilter(filters.FilterSet):
+    class Meta:
+        model = StockItem
+        fields = ("product",)
+
+
+class StockItemViewSet(viewsets.ModelViewSet):
+    queryset = StockItem.objects.select_related("product").all()
+    serializer_class = StockItemSerializer
+    filterset_class = StockItemFilter
+
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRoleAdmin()]

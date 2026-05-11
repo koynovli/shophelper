@@ -9,11 +9,13 @@ from .models import (
     Inventory,
     Placement,
     PlacementTask,
+    Planogram,
     PlanogramEquipment,
     Product,
     ProductBatch,
     Shelf,
     ShelfLevel,
+    StockItem,
     Store,
     Supplier,
     SupplyOrder,
@@ -203,10 +205,25 @@ class ShelfInline(admin.TabularInline):
 
 @admin.register(PlacementTask)
 class PlacementTaskAdmin(admin.ModelAdmin):
-    list_display = ("id", "product", "equipment", "quantity", "status", "created_at")
+    list_display = ("id", "planogram", "product", "equipment", "quantity", "status", "created_at")
     list_filter = ("status", "equipment__zone__store")
     search_fields = ("product__name", "product__sku", "equipment__name")
-    autocomplete_fields = ("product", "equipment")
+    autocomplete_fields = ("planogram", "product", "equipment")
+
+
+@admin.register(Planogram)
+class PlanogramAdmin(admin.ModelAdmin):
+    list_display = ("id", "equipment", "product", "target_quantity")
+    list_filter = ("equipment__zone__store",)
+    search_fields = ("product__sku", "product__name", "equipment__name")
+    autocomplete_fields = ("equipment", "product")
+
+
+@admin.register(StockItem)
+class StockItemAdmin(admin.ModelAdmin):
+    list_display = ("id", "product", "quantity")
+    search_fields = ("product__sku", "product__name")
+    autocomplete_fields = ("product",)
 
 
 @admin.register(Equipment)

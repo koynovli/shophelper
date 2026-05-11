@@ -100,7 +100,9 @@ export function EmployeeDashboard(): React.ReactElement {
           <Package className="h-6 w-6 text-emerald-400" aria-hidden />
           <div>
             <h1 className="text-lg font-semibold leading-tight sm:text-xl">Задачи на выкладку</h1>
-            <p className="text-xs text-slate-400 sm:text-sm">Только активные (ожидают выполнения)</p>
+            <p className="text-xs text-slate-400 sm:text-sm">
+              Сформированы автоматически по планограмме и остатку на складе
+            </p>
           </div>
         </div>
 
@@ -120,7 +122,7 @@ export function EmployeeDashboard(): React.ReactElement {
           </div>
         ) : tasks.length === 0 ? (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-12 text-center text-sm text-slate-400">
-            Нет задач в статусе «Ожидает». Когда администратор назначит выкладку, она появится здесь.
+            Нет задач в статусе «Ожидает». Появятся, когда планограмма и склад дадут нехватку на полке.
           </div>
         ) : (
           <ul className="flex flex-col gap-3 sm:gap-4">
@@ -128,11 +130,12 @@ export function EmployeeDashboard(): React.ReactElement {
               <li key={t.id}>
                 <article className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-lg sm:p-5">
                   <h2 className="text-base font-semibold leading-snug text-slate-50 sm:text-lg">
-                    {t.product.name} — {t.quantity} шт.
+                    Возьмите со склада: {t.product.name} — {t.quantity} шт.
                   </h2>
                   <p className="mt-2 text-sm text-slate-300 sm:text-base">
-                    Отнести в:{' '}
-                    <span className="font-medium text-emerald-200/95">{t.equipment.name}</span>
+                    Разместите в{' '}
+                    <span className="font-medium text-emerald-200/95">{t.equipment.name}</span> согласно
+                    планограмме.
                   </p>
                   <p className="mt-1 text-xs text-slate-500">SKU: {t.product.sku}</p>
                   <button

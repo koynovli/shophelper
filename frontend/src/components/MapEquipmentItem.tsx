@@ -6,7 +6,10 @@ type Props = {
   equipment: FloorEquipment;
   zoneColorHex: string;
   pxPerCm: number;
+  /** Режим выделения и геометрического редактирования на карте */
   editMode: boolean;
+  /** Режим мерчандайзинга: без перетаскивания, курсор pointer */
+  layoutLocked: boolean;
   selected: boolean;
   dragging: boolean;
   collision: boolean;
@@ -85,6 +88,7 @@ export function MapEquipmentItem({
   zoneColorHex,
   pxPerCm,
   editMode,
+  layoutLocked,
   selected,
   dragging,
   collision,
@@ -109,21 +113,32 @@ export function MapEquipmentItem({
     borderColor = '#f87171';
   } else if (dragging) {
     borderColor = '#34d399';
-  } else if (selected && editMode) {
+  } else if (selected && editMode && !layoutLocked) {
     borderColor = '#38bdf8';
   }
 
+  const allowDrag = editMode && !layoutLocked;
   const ringClass =
-    selected && editMode ? 'ring-2 ring-sky-400/90 ring-offset-1 ring-offset-slate-950' : 'ring-1 ring-white/10';
+    selected && editMode && !layoutLocked
+      ? 'ring-2 ring-sky-400/90 ring-offset-1 ring-offset-slate-950'
+      : 'ring-1 ring-white/10';
+
+  const cursorClass = layoutLocked
+    ? 'cursor-pointer'
+    : allowDrag
+      ? dragging
+        ? 'cursor-grabbing'
+        : 'cursor-grab'
+      : '';
 
   return (
     <button
       type="button"
       data-equipment
       title={equipment.name}
-      className={`group absolute overflow-hidden rounded-lg text-left outline-none hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${ringClass} ${
-        editMode ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : ''
-      } ${collision ? 'ring-2 ring-red-500/90' : ''}`}
+      className={`group absolute overflow-hidden rounded-lg text-left outline-none hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${ringClass} ${cursorClass} ${
+        collision ? 'ring-2 ring-red-500/90' : ''
+      }`}
       style={{
         left: `${left}px`,
         top: `${top}px`,
