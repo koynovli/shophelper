@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.db.models import Sum
 
 from .models import (
     Equipment,
@@ -48,20 +49,66 @@ class EquipmentSlotSerializer(serializers.ModelSerializer):
         planogram = obj.planograms.select_related("product").first()
         if planogram is None:
             return None
+        row = StockItem.objects.filter(product_id=planogram.product_id).first()
+        stock_qty = int(row.quantity) if row else 0
+        pending_sum = (
+            planogram.placement_tasks.filter(status=PlacementTask.Status.PENDING).aggregate(
+                total=Sum("quantity")
+            )["total"]
+        )
+        pending_qty = int(pending_sum or 0)
+        status = "OK"
+        if pending_qty > 0:
+            status = "IN_PROGRESS"
+        elif stock_qty <= 0:
+            status = "DEFICIT"
         return {
             "id": planogram.pk,
             "product": ProductBriefSerializer(planogram.product).data,
             "target_quantity": planogram.target_quantity,
+            "stock_quantity": stock_qty,
+            "pending_quantity": pending_qty,
+            "replenishment_status": status,
         }
 
 
 class PlacementTaskReadSerializer(serializers.ModelSerializer):
     product = ProductBriefSerializer(read_only=True)
     equipment = EquipmentBriefSerializer(read_only=True)
+    slot_info = serializers.SerializerMethodField()
+    destination_text = serializers.SerializerMethodField()
 
     class Meta:
         model = PlacementTask
-        fields = ("id", "planogram", "product", "equipment", "quantity", "status", "created_at")
+        fields = (
+            "id",
+            "planogram",
+            "product",
+            "equipment",
+            "slot_info",
+            "destination_text",
+            "quantity",
+            "status",
+            "created_at",
+        )
+
+    def get_slot_info(self, obj: PlacementTask):
+        if obj.planogram_id is None or obj.planogram.slot_id is None:
+            return None
+        slot = obj.planogram.slot
+        return {
+            "id": slot.id,
+            "row_index": slot.row_index,
+            "col_index": slot.col_index,
+        }
+
+    def get_destination_text(self, obj: PlacementTask) -> str:
+        if obj.planogram_id and obj.planogram.slot_id:
+            slot = obj.planogram.slot
+            return (
+                f"{obj.equipment.name} -> Полка {slot.row_index + 1} -> Ячейка {slot.col_index + 1}"
+            )
+        return obj.equipment.name
 
 
 class PlacementTaskUpdateSerializer(serializers.ModelSerializer):

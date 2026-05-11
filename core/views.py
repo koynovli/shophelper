@@ -461,6 +461,7 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
         "product",
         "equipment",
         "planogram",
+        "planogram__slot",
     ).all()
     permission_classes = [IsAuthenticated]
     filterset_class = PlacementTaskFilter

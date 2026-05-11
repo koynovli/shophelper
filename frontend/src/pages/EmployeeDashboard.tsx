@@ -10,6 +10,8 @@ type PlacementTaskRow = {
   id: number;
   product: { id: number; name: string; sku: string };
   equipment: { id: number; name: string };
+  slot_info: { id: number; row_index: number; col_index: number } | null;
+  destination_text: string;
   quantity: number;
   status: string;
   created_at: string;
@@ -33,6 +35,7 @@ export function EmployeeDashboard(): React.ReactElement {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [completingId, setCompletingId] = useState<number | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
 
   const loadPending = useCallback(async (): Promise<void> => {
     setError(null);
@@ -40,7 +43,9 @@ export function EmployeeDashboard(): React.ReactElement {
       const r = await api.get<unknown>('/placement-tasks/', {
         params: { status: 'PENDING' },
       });
-      setTasks(extractList<PlacementTaskRow>(r.data));
+      const list = extractList<PlacementTaskRow>(r.data);
+      setTasks(list);
+      setSelectedTaskId((prev) => prev ?? list[0]?.id ?? null);
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
       const detail = ax.response?.data?.detail;
@@ -66,6 +71,7 @@ export function EmployeeDashboard(): React.ReactElement {
     try {
       await api.patch(`/placement-tasks/${id}/`, { status: 'COMPLETED' });
       setTasks((prev) => prev.filter((t) => t.id !== id));
+      setSelectedTaskId((prev) => (prev === id ? null : prev));
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
       const detail = ax.response?.data?.detail;
@@ -125,17 +131,47 @@ export function EmployeeDashboard(): React.ReactElement {
             Нет задач в статусе «Ожидает». Появятся, когда планограмма и склад дадут нехватку на полке.
           </div>
         ) : (
-          <ul className="flex flex-col gap-3 sm:gap-4">
+          <>
+            <div className="mb-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Мини-карта направления</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {Array.from(new Set(tasks.map((t) => t.equipment.id))).map((eqId) => {
+                  const eqName = tasks.find((t) => t.equipment.id === eqId)?.equipment.name ?? `Оборудование ${eqId}`;
+                  const active = tasks.find((t) => t.id === selectedTaskId)?.equipment.id === eqId;
+                  return (
+                    <div
+                      key={eqId}
+                      className={`rounded-md border px-3 py-1 text-xs ${
+                        active
+                          ? 'border-emerald-400 bg-emerald-900/30 text-emerald-100'
+                          : 'border-slate-700 bg-slate-900 text-slate-400'
+                      }`}
+                    >
+                      {eqName}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500">
+                Нажмите на карточку задачи, чтобы подсветить целевое оборудование.
+              </p>
+            </div>
+            <ul className="flex flex-col gap-3 sm:gap-4">
             {tasks.map((t) => (
               <li key={t.id}>
-                <article className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-lg sm:p-5">
+                <article
+                  onClick={() => setSelectedTaskId(t.id)}
+                  className={`cursor-pointer rounded-2xl border bg-slate-900/70 p-4 shadow-lg transition sm:p-5 ${
+                    selectedTaskId === t.id
+                      ? 'border-emerald-500/70 ring-1 ring-emerald-400/50'
+                      : 'border-slate-800 hover:border-slate-700'
+                  }`}
+                >
                   <h2 className="text-base font-semibold leading-snug text-slate-50 sm:text-lg">
                     Возьмите со склада: {t.product.name} — {t.quantity} шт.
                   </h2>
                   <p className="mt-2 text-sm text-slate-300 sm:text-base">
-                    Разместите в{' '}
-                    <span className="font-medium text-emerald-200/95">{t.equipment.name}</span> согласно
-                    планограмме.
+                    Разместите в <span className="font-medium text-emerald-200/95">{t.destination_text}</span>.
                   </p>
                   <p className="mt-1 text-xs text-slate-500">SKU: {t.product.sku}</p>
                   <button
@@ -159,7 +195,8 @@ export function EmployeeDashboard(): React.ReactElement {
                 </article>
               </li>
             ))}
-          </ul>
+            </ul>
+          </>
         )}
       </main>
     </div>

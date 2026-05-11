@@ -1497,17 +1497,24 @@ function StoreMap() {
                           {rowSlots.map((slot) => {
                             const isActive = slot.id === selectedSlotId;
                             const hasPlanogram = Boolean(slot.planogram);
+                            const replStatus = slot.planogram?.replenishment_status;
+                            const statusClass =
+                              replStatus === 'IN_PROGRESS'
+                                ? 'border-amber-500/70 bg-amber-900/25 text-amber-100'
+                                : replStatus === 'DEFICIT'
+                                  ? 'border-rose-500/70 bg-rose-900/30 text-rose-100'
+                                  : hasPlanogram
+                                    ? 'border-emerald-600/60 bg-emerald-900/25 text-emerald-100'
+                                    : 'border-slate-600 bg-slate-800/70 text-slate-300';
                             return (
                               <button
                                 key={slot.id}
                                 type="button"
                                 onClick={() => setSelectedSlotId(slot.id)}
                                 style={{ width: `${slot.width_percent}%` }}
-                                className={`min-h-[72px] rounded-md border px-2 py-2 text-left text-xs transition ${
-                                  hasPlanogram
-                                    ? 'border-emerald-600/60 bg-emerald-900/25 text-emerald-100'
-                                    : 'border-slate-600 bg-slate-800/70 text-slate-300'
-                                } ${isActive ? 'ring-2 ring-indigo-400/80' : 'hover:border-slate-500'}`}
+                                className={`min-h-[72px] rounded-md border px-2 py-2 text-left text-xs transition ${statusClass} ${
+                                  isActive ? 'ring-2 ring-indigo-400/80' : 'hover:border-slate-500'
+                                }`}
                               >
                                 {slot.planogram ? (
                                   <>
@@ -1515,6 +1522,14 @@ function StoreMap() {
                                     <div className="mt-1 text-[11px] text-emerald-200/90">
                                       Цель: {slot.planogram.target_quantity} шт.
                                     </div>
+                                    {replStatus === 'IN_PROGRESS' ? (
+                                      <div className="mt-1 text-[10px] text-amber-100">
+                                        В процессе пополнения
+                                      </div>
+                                    ) : null}
+                                    {replStatus === 'DEFICIT' ? (
+                                      <div className="mt-1 text-[10px] text-rose-100">Дефицит</div>
+                                    ) : null}
                                   </>
                                 ) : (
                                   <span className="text-slate-400">+ Добавить товар</span>

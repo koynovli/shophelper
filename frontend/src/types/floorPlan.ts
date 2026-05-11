@@ -37,6 +37,9 @@ export interface EquipmentSlot {
     id: number;
     product: { id: number; name: string; sku: string };
     target_quantity: number;
+    stock_quantity?: number;
+    pending_quantity?: number;
+    replenishment_status?: 'OK' | 'IN_PROGRESS' | 'DEFICIT' | string;
   } | null;
 }
 

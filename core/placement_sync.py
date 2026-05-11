@@ -1,56 +1,57 @@
 from __future__ import annotations
 
+from django.db import transaction
 from django.db.models import Sum
 
-from .models import Inventory, PlacementTask, Planogram, StockItem
-
-
-def _quantity_on_shelf_for_equipment(*, equipment_id: int, product_id: int) -> int:
-    total = (
-        Inventory.objects.filter(
-            product_id=product_id,
-            shelf__equipment_id=equipment_id,
-            status=Inventory.LocationStatus.SHELF,
-        ).aggregate(t=Sum("quantity"))["t"]
-    )
-    return int(total or 0)
+from .models import PlacementTask, Planogram, StockItem
 
 
 def reconcile_planogram(planogram: Planogram) -> None:
     """
-    Создаёт/обновляет одну PENDING-задачу на выкладку по планограмме и складу.
+    Автоматически создаёт новую задачу пополнения и резервирует склад.
 
-    Количество задачи = min(остаток на складе, нехватка до целевого количества на полке).
+    Дефицит считается как target_quantity - сумма PENDING-задач для этой планограммы.
+    При создании задачи количество резерва вычитается из StockItem.quantity.
     """
-    stock = StockItem.objects.filter(product_id=planogram.product_id).first()
-    stock_qty = int(stock.quantity) if stock else 0
+    with transaction.atomic():
+        pg = (
+            Planogram.objects.select_for_update()
+            .select_related("slot", "slot__equipment", "product")
+            .get(pk=planogram.pk)
+        )
+        stock = (
+            StockItem.objects.select_for_update()
+            .filter(product_id=pg.product_id)
+            .first()
+        )
+        if stock is None or int(stock.quantity) <= 0:
+            return
 
-    equipment_id = planogram.slot.equipment_id
-    on_shelf = _quantity_on_shelf_for_equipment(
-        equipment_id=equipment_id,
-        product_id=planogram.product_id,
-    )
-    needed = max(0, int(planogram.target_quantity) - on_shelf)
+        pending_sum = (
+            PlacementTask.objects.filter(
+                planogram_id=pg.pk,
+                status=PlacementTask.Status.PENDING,
+            ).aggregate(total=Sum("quantity"))["total"]
+        )
+        reserved_qty = int(pending_sum or 0)
+        deficit = int(pg.target_quantity) - reserved_qty
+        if deficit <= 0:
+            return
 
-    pending_qs = PlacementTask.objects.filter(
-        planogram=planogram,
-        status=PlacementTask.Status.PENDING,
-    )
+        stock_qty = int(stock.quantity)
+        task_qty = min(deficit, stock_qty)
+        if task_qty <= 0:
+            return
 
-    if needed <= 0 or stock_qty <= 0:
-        pending_qs.delete()
-        return
-
-    task_qty = min(needed, stock_qty)
-    PlacementTask.objects.update_or_create(
-        planogram=planogram,
-        status=PlacementTask.Status.PENDING,
-        defaults={
-            "product_id": planogram.product_id,
-            "equipment_id": equipment_id,
-            "quantity": task_qty,
-        },
-    )
+        PlacementTask.objects.create(
+            planogram_id=pg.pk,
+            product_id=pg.product_id,
+            equipment_id=pg.slot.equipment_id,
+            quantity=task_qty,
+            status=PlacementTask.Status.PENDING,
+        )
+        stock.quantity = stock_qty - task_qty
+        stock.save(update_fields=["quantity"])
 
 
 def reconcile_for_product(product_id: int) -> None:
