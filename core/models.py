@@ -552,8 +552,10 @@ class Equipment(models.Model):
     """Оборудование на плане зала (цифровой двойник)."""
 
     class EquipmentType(models.TextChoices):
-        SHELF = "shelf", "Стеллаж"
+        SHELVING = "shelving", "Стеллаж"
+        PEGBOARD = "pegboard", "Перфорированная панель"
         FRIDGE = "fridge", "Холодильник"
+        PALLET = "pallet", "Паллета"
         DISPLAY = "display", "Витрина"
 
     name = models.CharField(
@@ -571,7 +573,7 @@ class Equipment(models.Model):
     type = models.CharField(
         max_length=20,
         choices=EquipmentType.choices,
-        default=EquipmentType.SHELF,
+        default=EquipmentType.SHELVING,
         verbose_name="Тип",
         help_text="Тип оборудования для отрисовки и логики.",
     )
@@ -591,10 +593,15 @@ class Equipment(models.Model):
         verbose_name="Высота",
         help_text="Высота объекта на плане (условные единицы или см — по договорённости).",
     )
-    orientation = models.FloatField(
+    rotation = models.FloatField(
         default=0.0,
         verbose_name="Поворот (°)",
         help_text="Угол поворота объекта на плане в градусах.",
+    )
+    shelf_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Число полок (визуализация)",
+        help_text="Для схематичной отрисовки горизонтальных полок на карте (без связи с моделью Shelf).",
     )
 
     class Meta:

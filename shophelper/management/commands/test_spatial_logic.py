@@ -80,12 +80,12 @@ class Command(BaseCommand):
         rack = Equipment.objects.create(
             name="Стеллаж пристенный №1",
             zone=zone,
-            type=Equipment.EquipmentType.SHELF,
+            type=Equipment.EquipmentType.SHELVING,
             pos_x=10.5,
             pos_y=20.0,
             width=100.0,
             height=200.0,
-            orientation=0.0,
+            rotation=0.0,
         )
 
         shelf1 = Shelf.objects.create(

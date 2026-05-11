@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -21,39 +22,23 @@ import {
 } from 'react-zoom-pan-pinch';
 
 import api from '../api';
+import type { FloorEquipment, FloorEquipmentType, FloorZone } from '../types/floorPlan';
+import { normalizeFloorEquipment } from '../types/floorPlan';
+import {
+  magneticSnapTopLeftPx,
+  obbIntersectPx,
+  snapCoordPx,
+  snapRotationDeg,
+  SNAP_GRID_PX,
+} from '../utils/floorPlanGeometry';
+import { MapEquipmentItem } from './MapEquipmentItem';
 
-type Shelf = {
-  id: number;
-  level: number;
-  width: number;
-  height: number;
-  depth: number;
-};
-
-type Equipment = {
-  id: number;
-  name: string;
-  type: string;
-  pos_x: number;
-  pos_y: number;
-  width: number;
-  height: number;
-  orientation: number;
-  shelves: Shelf[];
-};
-
-type Zone = {
-  id: number;
-  name: string;
-  color: string;
-  equipment: Equipment[];
-};
-
-/** Пикселей на 1 см координат из БД */
+/** Пикселей на 1 см координат из БД (10 px = 1 см на карте) */
 const PX_PER_CM = 10;
 
-const MIN_LABEL_WIDTH_PX = 72;
-const MIN_LABEL_HEIGHT_PX = 28;
+const MAGNETIC_THRESHOLD_PX = 5;
+const CLONE_OFFSET_PX = 20;
+const MAX_HISTORY = 50;
 
 type WheelConfig = {
   step?: number;
@@ -61,32 +46,13 @@ type WheelConfig = {
   disabled?: boolean;
 };
 
-/** Доп. проп библиотеки (в типах может отсутствовать) */
 type TransformWrapperExtras = {
   alignmentAnimation?: { size?: number };
 };
 
-const normalizeColor = (value: string): string => {
-  if (!value) {
-    return '#475569';
-  }
-  return /^#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})$/.test(value) ? value : '#475569';
-};
-
-const withAlpha = (hexColor: string, alpha: number): string => {
-  const color = normalizeColor(hexColor).replace('#', '');
-  const normalized =
-    color.length === 3
-      ? color
-          .split('')
-          .map((c) => `${c}${c}`)
-          .join('')
-      : color;
-  const a = Math.max(0, Math.min(255, Math.round(alpha * 255)))
-    .toString(16)
-    .padStart(2, '0');
-  return `#${normalized}${a}`;
-};
+function cloneZones(zones: FloorZone[]): FloorZone[] {
+  return JSON.parse(JSON.stringify(zones)) as FloorZone[];
+}
 
 function MapZoomToolbar() {
   const { zoomIn, zoomOut, resetTransform } = useControls();
@@ -127,24 +93,34 @@ function MapZoomToolbar() {
 }
 
 function StoreMap() {
-  const [zones, setZones] = useState<Zone[]>([]);
+  const [zones, setZones] = useState<FloorZone[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
   const [editMode, setEditMode] = useState(false);
   const [draggingItem, setDraggingItem] = useState<number | null>(null);
+  const [selectedEquipmentId, setSelectedEquipmentId] = useState<number | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [newObjCoords, setNewObjCoords] = useState({ x: 0, y: 0 });
   const [newEquipmentForm, setNewEquipmentForm] = useState({
     name: '',
     widthCm: 120,
     lengthCm: 60,
-    orientation: 0 as 0 | 90 | 180 | 270,
+    rotation: 0,
+    type: 'shelving' as FloorEquipmentType,
+    shelfCount: 4,
   });
   const [isSaving, setIsSaving] = useState(false);
   const [minScale, setMinScale] = useState(0.05);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const suppressNextMapClickRef = useRef(false);
+  const zonesRef = useRef<FloorZone[]>([]);
+  const undoStackRef = useRef<FloorZone[][]>([]);
+  const redoStackRef = useRef<FloorZone[][]>([]);
+
+  useEffect(() => {
+    zonesRef.current = zones;
+  }, [zones]);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {
@@ -153,7 +129,15 @@ function StoreMap() {
         const payload = Array.isArray(response.data)
           ? response.data
           : response.data.results ?? [];
-        setZones(payload as Zone[]);
+        const normalized = (payload as Record<string, unknown>[]).map((z) => ({
+          ...z,
+          equipment: Array.isArray(z.equipment)
+            ? (z.equipment as Record<string, unknown>[]).map((eq) =>
+                normalizeFloorEquipment(eq),
+              )
+            : [],
+        })) as FloorZone[];
+        setZones(normalized);
       } catch (error) {
         console.error('Не удалось загрузить карту зала:', error);
         setZones([]);
@@ -207,9 +191,80 @@ function StoreMap() {
     [zones],
   );
 
+  const equipmentLayoutsPx = useMemo(
+    () =>
+      allEquipment.map((eq) => ({
+        id: eq.id,
+        left: eq.pos_x * PX_PER_CM,
+        top: eq.pos_y * PX_PER_CM,
+        width: Math.max(eq.width * PX_PER_CM, 8),
+        height: Math.max(eq.height * PX_PER_CM, 8),
+        rotation: eq.rotation ?? 0,
+      })),
+    [allEquipment],
+  );
+
+  const collisionIds = useMemo(() => {
+    const hit = new Set<number>();
+    const layouts = equipmentLayoutsPx;
+    for (let i = 0; i < layouts.length; i++) {
+      for (let j = i + 1; j < layouts.length; j++) {
+        const a = layouts[i];
+        const b = layouts[j];
+        if (
+          obbIntersectPx(
+            a.left,
+            a.top,
+            a.width,
+            a.height,
+            a.rotation,
+            b.left,
+            b.top,
+            b.width,
+            b.height,
+            b.rotation,
+          )
+        ) {
+          hit.add(a.id);
+          hit.add(b.id);
+        }
+      }
+    }
+    return hit;
+  }, [equipmentLayoutsPx]);
+
   const meterGridPx = 100 * PX_PER_CM;
   const defaultZoneId = zones[0]?.id ?? null;
-  const SNAP_STEP_CM = 50;
+
+  const pushUndoSnapshot = useCallback((): void => {
+    undoStackRef.current.push(cloneZones(zonesRef.current));
+    if (undoStackRef.current.length > MAX_HISTORY) {
+      undoStackRef.current.shift();
+    }
+    redoStackRef.current = [];
+  }, []);
+
+  const undo = useCallback((): void => {
+    setZones((current) => {
+      const snap = undoStackRef.current.pop();
+      if (!snap) {
+        return current;
+      }
+      redoStackRef.current.push(cloneZones(current));
+      return snap;
+    });
+  }, []);
+
+  const redo = useCallback((): void => {
+    setZones((current) => {
+      const snap = redoStackRef.current.pop();
+      if (!snap) {
+        return current;
+      }
+      undoStackRef.current.push(cloneZones(current));
+      return snap;
+    });
+  }, []);
 
   const gridStyle = useMemo(
     (): React.CSSProperties => ({
@@ -226,29 +281,17 @@ function StoreMap() {
     [meterGridPx],
   );
 
-  const handleMapClick = (event: React.MouseEvent<HTMLDivElement>): void => {
-    if (!editMode) {
-      return;
-    }
-    if (suppressNextMapClickRef.current) {
-      suppressNextMapClickRef.current = false;
-      return;
-    }
-    if (draggingItem !== null) {
-      return;
-    }
-    const mapEl = event.currentTarget;
-    const rect = mapEl.getBoundingClientRect();
-    const offsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
-    const offsetY = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
-    const x_cm = Math.round(offsetX / PX_PER_CM);
-    const y_cm = Math.round(offsetY / PX_PER_CM);
-    setNewObjCoords({ x: x_cm, y: y_cm });
-    setIsModalOpen(true);
-  };
-
-  const snapCm = (valueCm: number): number =>
-    Math.round(valueCm / SNAP_STEP_CM) * SNAP_STEP_CM;
+  const clampEquipmentTopLeftCm = useCallback(
+    (eq: FloorEquipment, xCm: number, yCm: number): { x: number; y: number } => {
+      const maxX = Math.max(0, dimensions.width * 100 - eq.width);
+      const maxY = Math.max(0, dimensions.height * 100 - eq.height);
+      return {
+        x: Math.min(Math.max(xCm, 0), maxX),
+        y: Math.min(Math.max(yCm, 0), maxY),
+      };
+    },
+    [dimensions.height, dimensions.width],
+  );
 
   const updateEquipmentPositionInState = (
     equipmentId: number,
@@ -265,31 +308,85 @@ function StoreMap() {
     );
   };
 
-  const handleMapPointerMove = (
-    event: React.PointerEvent<HTMLDivElement>,
-  ): void => {
+  const handleMapClick = (event: React.MouseEvent<HTMLDivElement>): void => {
+    if (!editMode) {
+      return;
+    }
+    if (suppressNextMapClickRef.current) {
+      suppressNextMapClickRef.current = false;
+      return;
+    }
+    if (draggingItem !== null) {
+      return;
+    }
+    setSelectedEquipmentId(null);
+    const mapEl = event.currentTarget;
+    const rect = mapEl.getBoundingClientRect();
+    const offsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
+    const offsetY = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
+    const xCm = Math.round(offsetX / PX_PER_CM);
+    const yCm = Math.round(offsetY / PX_PER_CM);
+    setNewObjCoords({ x: xCm, y: yCm });
+    setIsModalOpen(true);
+  };
+
+  const handleMapPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
     if (draggingItem === null) {
       return;
     }
     event.preventDefault();
+    const dragged = zonesRef.current
+      .flatMap((z) => z.equipment)
+      .find((eq) => eq.id === draggingItem);
+    if (!dragged) {
+      return;
+    }
+
     const mapEl = event.currentTarget;
     const rect = mapEl.getBoundingClientRect();
-    const rawOffsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
-    const rawOffsetY = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
+    const rawLeftPx = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
+    const rawTopPx = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
 
-    const xCmRaw = Math.max(0, Math.min(Math.round(rawOffsetX / PX_PER_CM), dimensions.width * 100));
-    const yCmRaw = Math.max(0, Math.min(Math.round(rawOffsetY / PX_PER_CM), dimensions.height * 100));
-    const snappedX = snapCm(xCmRaw);
-    const snappedY = snapCm(yCmRaw);
+    let leftPx = snapCoordPx(rawLeftPx);
+    let topPx = snapCoordPx(rawTopPx);
 
-    updateEquipmentPositionInState(draggingItem, snappedX, snappedY);
+    const widthPx = Math.max(dragged.width * PX_PER_CM, 8);
+    const heightPx = Math.max(dragged.height * PX_PER_CM, 8);
+    const rotation = dragged.rotation ?? 0;
+
+    const snappedMag = magneticSnapTopLeftPx(
+      leftPx,
+      topPx,
+      widthPx,
+      heightPx,
+      rotation,
+      equipmentLayoutsPx,
+      draggingItem,
+      MAGNETIC_THRESHOLD_PX,
+    );
+    leftPx = snapCoordPx(snappedMag.left);
+    topPx = snapCoordPx(snappedMag.top);
+
+    let xCm = leftPx / PX_PER_CM;
+    let yCm = topPx / PX_PER_CM;
+    const clamped = clampEquipmentTopLeftCm(dragged, xCm, yCm);
+    xCm = clamped.x;
+    yCm = clamped.y;
+
+    leftPx = snapCoordPx(xCm * PX_PER_CM);
+    topPx = snapCoordPx(yCm * PX_PER_CM);
+    const reclamped = clampEquipmentTopLeftCm(dragged, leftPx / PX_PER_CM, topPx / PX_PER_CM);
+
+    updateEquipmentPositionInState(draggingItem, reclamped.x, reclamped.y);
   };
 
   const persistDraggedEquipment = async (): Promise<void> => {
     if (draggingItem === null) {
       return;
     }
-    const dragged = allEquipment.find((eq) => eq.id === draggingItem);
+    const dragged = zonesRef.current
+      .flatMap((z) => z.equipment)
+      .find((eq) => eq.id === draggingItem);
     if (!dragged) {
       setDraggingItem(null);
       return;
@@ -320,7 +417,9 @@ function StoreMap() {
       name: '',
       widthCm: 120,
       lengthCm: 60,
-      orientation: 0,
+      rotation: 0,
+      type: 'shelving',
+      shelfCount: 4,
     });
   };
 
@@ -337,19 +436,23 @@ function StoreMap() {
     const payload = {
       name: newEquipmentForm.name.trim(),
       zone: defaultZoneId,
-      type: 'shelf',
+      type: newEquipmentForm.type,
       pos_x: newObjCoords.x,
       pos_y: newObjCoords.y,
       width: newEquipmentForm.widthCm,
       height: newEquipmentForm.lengthCm,
-      orientation: newEquipmentForm.orientation,
+      rotation: snapRotationDeg(newEquipmentForm.rotation),
+      shelf_count: newEquipmentForm.shelfCount,
     };
 
     try {
       setIsSaving(true);
+      pushUndoSnapshot();
       const response = await api.post('/floor-equipment/', payload);
       if (response.status === 201) {
-        const createdEquipment = response.data as Equipment;
+        const createdEquipment = normalizeFloorEquipment(
+          response.data as Record<string, unknown>,
+        );
         setZones((prevZones) =>
           prevZones.map((zone) =>
             zone.id === defaultZoneId
@@ -367,6 +470,120 @@ function StoreMap() {
       setIsSaving(false);
     }
   };
+
+  const rotateSelected = useCallback(
+    async (deltaDeg: number): Promise<void> => {
+      if (!selectedEquipmentId) {
+        return;
+      }
+      const sel = zonesRef.current
+        .flatMap((z) => z.equipment)
+        .find((eq) => eq.id === selectedEquipmentId);
+      if (!sel) {
+        return;
+      }
+      const nextRotation = snapRotationDeg(sel.rotation + deltaDeg);
+      pushUndoSnapshot();
+      setZones((prevZones) =>
+        prevZones.map((zone) => ({
+          ...zone,
+          equipment: zone.equipment.map((eq) =>
+            eq.id === selectedEquipmentId ? { ...eq, rotation: nextRotation } : eq,
+          ),
+        })),
+      );
+      try {
+        await api.patch(`/floor-equipment/${selectedEquipmentId}/`, {
+          rotation: nextRotation,
+        });
+      } catch (error) {
+        console.error('Ошибка сохранения поворота:', error);
+        alert('Не удалось сохранить поворот на сервере.');
+      }
+    },
+    [pushUndoSnapshot, selectedEquipmentId],
+  );
+
+  const cloneSelected = useCallback(async (): Promise<void> => {
+    if (!selectedEquipmentId) {
+      return;
+    }
+    const sel = zonesRef.current
+      .flatMap((z) => z.equipment)
+      .find((eq) => eq.id === selectedEquipmentId);
+    if (!sel) {
+      return;
+    }
+
+    const deltaCm = CLONE_OFFSET_PX / PX_PER_CM;
+    const payload = {
+      name: `${sel.name} (копия)`,
+      zone: sel.zone,
+      type: sel.type === 'shelf' ? 'shelving' : sel.type,
+      pos_x: sel.pos_x + deltaCm,
+      pos_y: sel.pos_y + deltaCm,
+      width: sel.width,
+      height: sel.height,
+      rotation: snapRotationDeg(sel.rotation),
+      shelf_count: sel.shelf_count ?? 0,
+    };
+
+    try {
+      pushUndoSnapshot();
+      const response = await api.post('/floor-equipment/', payload);
+      if (response.status === 201) {
+        const created = normalizeFloorEquipment(response.data as Record<string, unknown>);
+        setZones((prevZones) =>
+          prevZones.map((zone) =>
+            zone.id === created.zone
+              ? { ...zone, equipment: [...zone.equipment, created] }
+              : zone,
+          ),
+        );
+        setSelectedEquipmentId(created.id);
+      }
+    } catch (error) {
+      console.error('Ошибка клонирования:', error);
+      alert('Не удалось клонировать оборудование.');
+    }
+  }, [pushUndoSnapshot, selectedEquipmentId]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (!editMode) {
+        return;
+      }
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        return;
+      }
+
+      const mod = e.ctrlKey || e.metaKey;
+
+      if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        void cloneSelected();
+        return;
+      }
+      if (!mod && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        void rotateSelected(e.shiftKey ? 1 : 5);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [cloneSelected, editMode, redo, rotateSelected, undo]);
 
   if (loading) {
     return (
@@ -401,7 +618,6 @@ function StoreMap() {
 
   return (
     <section className="flex min-h-0 w-full flex-col gap-3">
-      {/* Размеры магазина — вне области масштабирования */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           Размеры зала (м)
@@ -413,10 +629,10 @@ function StoreMap() {
             min={1}
             step={0.5}
             value={dimensions.width}
-            onChange={(e) =>
+            onChange={(ev) =>
               setDimensions((d) => ({
                 ...d,
-                width: Math.max(1, Number(e.target.value) || 1),
+                width: Math.max(1, Number(ev.target.value) || 1),
               }))
             }
             className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
@@ -429,10 +645,10 @@ function StoreMap() {
             min={1}
             step={0.5}
             value={dimensions.height}
-            onChange={(e) =>
+            onChange={(ev) =>
               setDimensions((d) => ({
                 ...d,
-                height: Math.max(1, Number(e.target.value) || 1),
+                height: Math.max(1, Number(ev.target.value) || 1),
               }))
             }
             className="w-20 rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
@@ -443,7 +659,10 @@ function StoreMap() {
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
         <button
           type="button"
-          onClick={() => setEditMode((v) => !v)}
+          onClick={() => {
+            setEditMode((v) => !v);
+            setDraggingItem(null);
+          }}
           className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
             editMode
               ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
@@ -462,8 +681,7 @@ function StoreMap() {
         </span>
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
           <Ruler className="h-3.5 w-3.5 text-indigo-300" />
-          {dimensions.width}×{dimensions.height} м · {PX_PER_CM} px/см · 1 м ={' '}
-          {meterGridPx}px · fit minScale ≈ {minScale.toFixed(4)}
+          Сетка {SNAP_GRID_PX}px ({SNAP_GRID_PX / PX_PER_CM} см) · магнит ±{MAGNETIC_THRESHOLD_PX}px
         </span>
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
           <Warehouse className="h-3.5 w-3.5 text-amber-300" />
@@ -500,112 +718,45 @@ function StoreMap() {
                 onPointerLeave={handleMapPointerUp}
               >
                 {zones.map((zone) =>
-                  zone.equipment.map((eq) => {
-                    const left = eq.pos_x * PX_PER_CM;
-                    const top = eq.pos_y * PX_PER_CM;
-                    const pixelWidth = Math.max(eq.width * PX_PER_CM, 8);
-                    const pixelHeight = Math.max(eq.height * PX_PER_CM, 8);
-                    const zoneColor = normalizeColor(zone.color);
-                    const showInlineLabel =
-                      pixelWidth >= MIN_LABEL_WIDTH_PX &&
-                      pixelHeight >= MIN_LABEL_HEIGHT_PX;
-
-                    const isDraggingCurrent = draggingItem === eq.id;
-                    return (
-                      <button
-                        key={eq.id}
-                        type="button"
-                        data-equipment
-                        title={eq.name}
-                        className={`group absolute overflow-hidden rounded-lg text-left outline-none ring-1 ring-white/10 transition hover:ring-emerald-400/70 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${
-                          editMode
-                            ? isDraggingCurrent
-                              ? 'cursor-grabbing'
-                              : 'cursor-grab'
-                            : ''
-                        }`}
-                        style={{
-                          left: `${left}px`,
-                          top: `${top}px`,
-                          width: `${pixelWidth}px`,
-                          height: `${pixelHeight}px`,
-                          transform: `rotate(${eq.orientation || 0}deg)`,
-                          transformOrigin: 'center center',
-                          borderWidth: 2,
-                          borderStyle: 'solid',
-                          borderColor: isDraggingCurrent
-                            ? '#34d399'
-                            : withAlpha(zoneColor, 0.92),
-                          boxShadow: `
-                            ${isDraggingCurrent ? '0 16px 36px rgba(16, 185, 129, 0.45),' : '0 10px 28px rgba(0, 0, 0, 0.55),'}
-                            0 2px 8px rgba(0, 0, 0, 0.35),
-                            inset 0 1px 0 rgba(255, 255, 255, 0.12)
-                          `,
-                          background: `
-                            linear-gradient(145deg,
-                              ${withAlpha(zoneColor, 0.55)} 0%,
-                              rgba(15, 23, 42, 0.92) 48%,
-                              ${withAlpha(zoneColor, 0.35)} 100%
-                            )
-                          `,
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!editMode) {
-                            console.log(
-                              `Полки стеллажа "${eq.name}"`,
-                              eq.shelves ?? [],
-                            );
-                          }
-                        }}
-                        onPointerDown={(e) => {
-                          if (!editMode) {
-                            return;
-                          }
-                          e.stopPropagation();
-                          setDraggingItem(eq.id);
-                        }}
-                      >
-                        <span
-                          className="pointer-events-none absolute inset-0 opacity-[0.22]"
-                          style={{
-                            background: `linear-gradient(180deg, ${withAlpha(zoneColor, 0.9)} 0%, transparent 55%)`,
-                          }}
-                        />
-
-                        <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/55 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-100 shadow-sm backdrop-blur-[2px]">
-                          {eq.type}
-                        </span>
-
-                        {showInlineLabel ? (
-                          <span className="pointer-events-none absolute inset-x-1 bottom-1 top-auto z-10 truncate text-center text-[10px] font-semibold leading-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
-                            {eq.name}
-                          </span>
-                        ) : null}
-
-                        <span
-                          className={`pointer-events-none absolute left-1/2 z-20 max-w-[min(280px,calc(100vw-4rem))] -translate-x-1/2 whitespace-normal rounded-md border border-slate-600/90 bg-slate-950/95 px-2 py-1 text-left text-[10px] leading-snug text-slate-100 shadow-2xl backdrop-blur-sm transition-opacity duration-150 sm:whitespace-nowrap ${
-                            showInlineLabel
-                              ? 'bottom-full mb-1 opacity-0 group-hover:opacity-100'
-                              : '-top-7 opacity-0 group-hover:opacity-100'
-                          }`}
-                        >
-                          {eq.name}
-                        </span>
-                      </button>
-                    );
-                  }),
+                  zone.equipment.map((eq) => (
+                    <MapEquipmentItem
+                      key={eq.id}
+                      equipment={eq}
+                      zoneColorHex={zone.color}
+                      pxPerCm={PX_PER_CM}
+                      editMode={editMode}
+                      selected={selectedEquipmentId === eq.id}
+                      dragging={draggingItem === eq.id}
+                      collision={collisionIds.has(eq.id)}
+                      onPointerDown={(ev) => {
+                        if (!editMode) {
+                          return;
+                        }
+                        ev.stopPropagation();
+                        pushUndoSnapshot();
+                        setSelectedEquipmentId(eq.id);
+                        setDraggingItem(eq.id);
+                      }}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        if (!editMode) {
+                          console.log(`Полки стеллажа "${eq.name}"`, eq.shelves ?? []);
+                        }
+                      }}
+                    />
+                  )),
                 )}
               </div>
             </TransformComponent>
           </>
         </TransformWrapper>
 
-        <div className="pointer-events-none absolute bottom-3 left-4 z-20 max-w-[min(100%,24rem)] rounded-lg border border-slate-700/80 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-400 backdrop-blur-sm">
+        <div className="pointer-events-none absolute bottom-3 left-4 z-20 max-w-[min(100%,28rem)] rounded-lg border border-slate-700/80 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-400 backdrop-blur-sm">
           Колёсико — зум · перетаскивание — панорама
           {editMode ? (
             <span className="mt-1 block text-amber-200/90">
-              Редактирование: клик по карте → форма добавления оборудования
+              Клик по карте — новый объект · R / Shift+R — поворот · Ctrl+D — клон · Ctrl+Z / Ctrl+Y —
+              отмена / повтор
             </span>
           ) : null}
         </div>
@@ -620,10 +771,12 @@ function StoreMap() {
 
             <div className="mb-4 grid grid-cols-2 gap-3 text-sm">
               <div className="rounded-md border border-slate-700 bg-slate-900/70 px-3 py-2 text-slate-300">
-                X (см): <span className="font-semibold text-slate-100">{newObjCoords.x}</span>
+                X (см):{' '}
+                <span className="font-semibold text-slate-100">{newObjCoords.x}</span>
               </div>
               <div className="rounded-md border border-slate-700 bg-slate-900/70 px-3 py-2 text-slate-300">
-                Y (см): <span className="font-semibold text-slate-100">{newObjCoords.y}</span>
+                Y (см):{' '}
+                <span className="font-semibold text-slate-100">{newObjCoords.y}</span>
               </div>
             </div>
 
@@ -633,12 +786,32 @@ function StoreMap() {
                 <input
                   type="text"
                   value={newEquipmentForm.name}
-                  onChange={(e) =>
-                    setNewEquipmentForm((prev) => ({ ...prev, name: e.target.value }))
+                  onChange={(ev) =>
+                    setNewEquipmentForm((prev) => ({ ...prev, name: ev.target.value }))
                   }
                   className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
                   placeholder="Например, Стеллаж №5"
                 />
+              </label>
+
+              <label className="block text-sm text-slate-300">
+                Тип
+                <select
+                  value={newEquipmentForm.type}
+                  onChange={(ev) =>
+                    setNewEquipmentForm((prev) => ({
+                      ...prev,
+                      type: ev.target.value as FloorEquipmentType,
+                    }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                >
+                  <option value="shelving">Стеллаж</option>
+                  <option value="pegboard">Перфорированная панель</option>
+                  <option value="fridge">Холодильник</option>
+                  <option value="pallet">Паллета</option>
+                  <option value="display">Витрина</option>
+                </select>
               </label>
 
               <div className="grid grid-cols-2 gap-3">
@@ -648,10 +821,10 @@ function StoreMap() {
                     type="number"
                     min={1}
                     value={newEquipmentForm.widthCm}
-                    onChange={(e) =>
+                    onChange={(ev) =>
                       setNewEquipmentForm((prev) => ({
                         ...prev,
-                        widthCm: Math.max(1, Number(e.target.value) || 1),
+                        widthCm: Math.max(1, Number(ev.target.value) || 1),
                       }))
                     }
                     className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
@@ -663,10 +836,10 @@ function StoreMap() {
                     type="number"
                     min={1}
                     value={newEquipmentForm.lengthCm}
-                    onChange={(e) =>
+                    onChange={(ev) =>
                       setNewEquipmentForm((prev) => ({
                         ...prev,
-                        lengthCm: Math.max(1, Number(e.target.value) || 1),
+                        lengthCm: Math.max(1, Number(ev.target.value) || 1),
                       }))
                     }
                     className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
@@ -675,13 +848,30 @@ function StoreMap() {
               </div>
 
               <label className="block text-sm text-slate-300">
-                Угол поворота
-                <select
-                  value={newEquipmentForm.orientation}
-                  onChange={(e) =>
+                Число полок (визуал, для стеллажа)
+                <input
+                  type="number"
+                  min={0}
+                  max={50}
+                  value={newEquipmentForm.shelfCount}
+                  onChange={(ev) =>
                     setNewEquipmentForm((prev) => ({
                       ...prev,
-                      orientation: Number(e.target.value) as 0 | 90 | 180 | 270,
+                      shelfCount: Math.max(0, Math.min(50, Number(ev.target.value) || 0)),
+                    }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                />
+              </label>
+
+              <label className="block text-sm text-slate-300">
+                Угол поворота (°)
+                <select
+                  value={newEquipmentForm.rotation}
+                  onChange={(ev) =>
+                    setNewEquipmentForm((prev) => ({
+                      ...prev,
+                      rotation: Number(ev.target.value),
                     }))
                   }
                   className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"

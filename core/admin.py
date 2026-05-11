@@ -202,7 +202,7 @@ class ShelfInline(admin.TabularInline):
 
 @admin.register(Equipment)
 class FloorEquipmentAdmin(admin.ModelAdmin):
-    list_display = ("name", "zone", "type", "pos_x", "pos_y", "orientation")
+    list_display = ("name", "zone", "type", "pos_x", "pos_y", "rotation", "shelf_count")
     list_filter = ("type", "zone__store", "zone")
     search_fields = ("name", "zone__name")
     autocomplete_fields = ("zone",)
