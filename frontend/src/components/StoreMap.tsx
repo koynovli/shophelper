@@ -131,6 +131,7 @@ function StoreMap() {
   const [loading, setLoading] = useState<boolean>(true);
   const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
   const [editMode, setEditMode] = useState(false);
+  const [draggingItem, setDraggingItem] = useState<number | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [newObjCoords, setNewObjCoords] = useState({ x: 0, y: 0 });
   const [newEquipmentForm, setNewEquipmentForm] = useState({
@@ -143,6 +144,7 @@ function StoreMap() {
   const [minScale, setMinScale] = useState(0.05);
 
   const viewportRef = useRef<HTMLDivElement>(null);
+  const suppressNextMapClickRef = useRef(false);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {
@@ -207,6 +209,7 @@ function StoreMap() {
 
   const meterGridPx = 100 * PX_PER_CM;
   const defaultZoneId = zones[0]?.id ?? null;
+  const SNAP_STEP_CM = 50;
 
   const gridStyle = useMemo(
     (): React.CSSProperties => ({
@@ -227,6 +230,13 @@ function StoreMap() {
     if (!editMode) {
       return;
     }
+    if (suppressNextMapClickRef.current) {
+      suppressNextMapClickRef.current = false;
+      return;
+    }
+    if (draggingItem !== null) {
+      return;
+    }
     const mapEl = event.currentTarget;
     const rect = mapEl.getBoundingClientRect();
     const offsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
@@ -235,6 +245,74 @@ function StoreMap() {
     const y_cm = Math.round(offsetY / PX_PER_CM);
     setNewObjCoords({ x: x_cm, y: y_cm });
     setIsModalOpen(true);
+  };
+
+  const snapCm = (valueCm: number): number =>
+    Math.round(valueCm / SNAP_STEP_CM) * SNAP_STEP_CM;
+
+  const updateEquipmentPositionInState = (
+    equipmentId: number,
+    posX: number,
+    posY: number,
+  ): void => {
+    setZones((prevZones) =>
+      prevZones.map((zone) => ({
+        ...zone,
+        equipment: zone.equipment.map((eq) =>
+          eq.id === equipmentId ? { ...eq, pos_x: posX, pos_y: posY } : eq,
+        ),
+      })),
+    );
+  };
+
+  const handleMapPointerMove = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ): void => {
+    if (draggingItem === null) {
+      return;
+    }
+    event.preventDefault();
+    const mapEl = event.currentTarget;
+    const rect = mapEl.getBoundingClientRect();
+    const rawOffsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
+    const rawOffsetY = ((event.clientY - rect.top) / rect.height) * mapHeightPx;
+
+    const xCmRaw = Math.max(0, Math.min(Math.round(rawOffsetX / PX_PER_CM), dimensions.width * 100));
+    const yCmRaw = Math.max(0, Math.min(Math.round(rawOffsetY / PX_PER_CM), dimensions.height * 100));
+    const snappedX = snapCm(xCmRaw);
+    const snappedY = snapCm(yCmRaw);
+
+    updateEquipmentPositionInState(draggingItem, snappedX, snappedY);
+  };
+
+  const persistDraggedEquipment = async (): Promise<void> => {
+    if (draggingItem === null) {
+      return;
+    }
+    const dragged = allEquipment.find((eq) => eq.id === draggingItem);
+    if (!dragged) {
+      setDraggingItem(null);
+      return;
+    }
+    try {
+      await api.patch(`/floor-equipment/${draggingItem}/`, {
+        pos_x: dragged.pos_x,
+        pos_y: dragged.pos_y,
+      });
+    } catch (error) {
+      console.error('Ошибка сохранения позиции оборудования:', error);
+      alert('Не удалось сохранить новую позицию оборудования.');
+    } finally {
+      suppressNextMapClickRef.current = true;
+      setDraggingItem(null);
+    }
+  };
+
+  const handleMapPointerUp = (): void => {
+    if (draggingItem === null) {
+      return;
+    }
+    void persistDraggedEquipment();
   };
 
   const resetNewEquipmentForm = (): void => {
@@ -308,6 +386,10 @@ function StoreMap() {
       step: 0.02,
       smoothStep: 0.002,
     } as WheelConfig,
+    panning: {
+      disabled: draggingItem !== null,
+      velocityDisabled: false,
+    },
     doubleClick: { disabled: true },
     autoAlignment: {
       sizeX: 0,
@@ -413,6 +495,9 @@ function StoreMap() {
                   ...gridStyle,
                 }}
                 onClick={handleMapClick}
+                onPointerMove={handleMapPointerMove}
+                onPointerUp={handleMapPointerUp}
+                onPointerLeave={handleMapPointerUp}
               >
                 {zones.map((zone) =>
                   zone.equipment.map((eq) => {
@@ -425,13 +510,20 @@ function StoreMap() {
                       pixelWidth >= MIN_LABEL_WIDTH_PX &&
                       pixelHeight >= MIN_LABEL_HEIGHT_PX;
 
+                    const isDraggingCurrent = draggingItem === eq.id;
                     return (
                       <button
                         key={eq.id}
                         type="button"
                         data-equipment
                         title={eq.name}
-                        className={`group absolute overflow-hidden rounded-lg text-left outline-none ring-1 ring-white/10 transition hover:ring-emerald-400/70 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${editMode ? 'pointer-events-none' : ''}`}
+                        className={`group absolute overflow-hidden rounded-lg text-left outline-none ring-1 ring-white/10 transition hover:ring-emerald-400/70 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${
+                          editMode
+                            ? isDraggingCurrent
+                              ? 'cursor-grabbing'
+                              : 'cursor-grab'
+                            : ''
+                        }`}
                         style={{
                           left: `${left}px`,
                           top: `${top}px`,
@@ -441,9 +533,11 @@ function StoreMap() {
                           transformOrigin: 'center center',
                           borderWidth: 2,
                           borderStyle: 'solid',
-                          borderColor: withAlpha(zoneColor, 0.92),
+                          borderColor: isDraggingCurrent
+                            ? '#34d399'
+                            : withAlpha(zoneColor, 0.92),
                           boxShadow: `
-                            0 10px 28px rgba(0, 0, 0, 0.55),
+                            ${isDraggingCurrent ? '0 16px 36px rgba(16, 185, 129, 0.45),' : '0 10px 28px rgba(0, 0, 0, 0.55),'}
                             0 2px 8px rgba(0, 0, 0, 0.35),
                             inset 0 1px 0 rgba(255, 255, 255, 0.12)
                           `,
@@ -463,6 +557,13 @@ function StoreMap() {
                               eq.shelves ?? [],
                             );
                           }
+                        }}
+                        onPointerDown={(e) => {
+                          if (!editMode) {
+                            return;
+                          }
+                          e.stopPropagation();
+                          setDraggingItem(eq.id);
                         }}
                       >
                         <span
