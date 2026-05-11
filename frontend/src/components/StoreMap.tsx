@@ -132,6 +132,7 @@ function StoreMap() {
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<number | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<EquipmentModalMode>('create');
+  const [isNameManual, setIsNameManual] = useState(false);
   const [newObjCoords, setNewObjCoords] = useState({ x: 0, y: 0 });
   const [newEquipmentForm, setNewEquipmentForm] = useState({
     name: '',
@@ -153,13 +154,15 @@ function StoreMap() {
   const duplicateSourceRef = useRef<FloorEquipment | null>(null);
   const selectedEquipmentIdRef = useRef<number | null>(null);
 
+  /** Синхронно обновляет ref — A/D не должны ждать следующего рендера */
+  const selectEquipmentId = useCallback((id: number | null): void => {
+    selectedEquipmentIdRef.current = id;
+    setSelectedEquipmentId(id);
+  }, []);
+
   useEffect(() => {
     zonesRef.current = zones;
   }, [zones]);
-
-  useEffect(() => {
-    selectedEquipmentIdRef.current = selectedEquipmentId;
-  }, [selectedEquipmentId]);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {
@@ -355,7 +358,8 @@ function StoreMap() {
     (xCm: number, yCm: number): void => {
       const clamped = clampEquipmentTopLeftCm({ width: 120, height: 60 }, xCm, yCm);
       setModalMode('create');
-      setSelectedEquipmentId(null);
+      setIsNameManual(false);
+      selectEquipmentId(null);
       setNewObjCoords({ x: clamped.x, y: clamped.y });
       setNewEquipmentForm({
         name: nextGlobalEquipmentName(zonesRef.current, 'shelving'),
@@ -367,7 +371,7 @@ function StoreMap() {
       });
       setIsModalOpen(true);
     },
-    [clampEquipmentTopLeftCm],
+    [clampEquipmentTopLeftCm, selectEquipmentId],
   );
 
   const createFromDuplicateAt = useCallback(
@@ -401,14 +405,14 @@ function StoreMap() {
               zone.id === created.zone ? { ...zone, equipment: [...zone.equipment, created] } : zone,
             ),
           );
-          setSelectedEquipmentId(created.id);
+          selectEquipmentId(created.id);
         }
       } catch (error) {
         console.error('Ошибка дублирования в режиме DUPLICATE:', error);
         alert('Не удалось создать копию оборудования.');
       }
     },
-    [clampEquipmentTopLeftCm, pushUndoSnapshot],
+    [clampEquipmentTopLeftCm, pushUndoSnapshot, selectEquipmentId],
   );
 
   const handleMapClick = (event: React.MouseEvent<HTMLDivElement>): void => {
@@ -419,7 +423,7 @@ function StoreMap() {
     if (draggingItem !== null) {
       return;
     }
-    setSelectedEquipmentId(null);
+    selectEquipmentId(null);
     const mapEl = event.currentTarget;
     const rect = mapEl.getBoundingClientRect();
     const offsetX = ((event.clientX - rect.left) / rect.width) * mapWidthPx;
@@ -434,7 +438,6 @@ function StoreMap() {
       void createFromDuplicateAt(xCm, yCm);
       return;
     }
-    setSelectedEquipmentId(null);
   };
 
   const handleMapPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -577,7 +580,7 @@ function StoreMap() {
                 : zone,
             ),
           );
-          setSelectedEquipmentId(createdEquipment.id);
+          selectEquipmentId(createdEquipment.id);
         }
       } else if (selectedEquipmentId) {
         const response = await api.patch(`/floor-equipment/${selectedEquipmentId}/`, payload);
@@ -610,22 +613,24 @@ function StoreMap() {
       if (!id) {
         return;
       }
-      const sel = zonesRef.current
-        .flatMap((z) => z.equipment)
-        .find((eq) => eq.id === id);
-      if (!sel) {
-        return;
-      }
-      const nextRotation = snapRotationDeg(sel.rotation + deltaDeg);
       pushUndoSnapshot();
+      let nextRotation: number | null = null;
       setZones((prevZones) =>
         prevZones.map((zone) => ({
           ...zone,
-          equipment: zone.equipment.map((eq) =>
-            eq.id === id ? { ...eq, rotation: nextRotation } : eq,
-          ),
+          equipment: zone.equipment.map((eq) => {
+            if (eq.id !== id) {
+              return eq;
+            }
+            const base = typeof eq.rotation === 'number' ? eq.rotation : 0;
+            nextRotation = snapRotationDeg(base + deltaDeg);
+            return { ...eq, rotation: nextRotation };
+          }),
         })),
       );
+      if (nextRotation === null) {
+        return;
+      }
       try {
         await api.patch(`/floor-equipment/${id}/`, {
           rotation: nextRotation,
@@ -657,18 +662,19 @@ function StoreMap() {
       setZones((prevZones) =>
         prevZones.map((z) => ({ ...z, equipment: z.equipment.filter((e) => e.id !== id) })),
       );
-      setSelectedEquipmentId(null);
+      selectEquipmentId(null);
       setIsModalOpen(false);
       resetNewEquipmentForm();
     } catch (error) {
       console.error('Ошибка удаления оборудования:', error);
       alert('Не удалось удалить оборудование.');
     }
-  }, [pushUndoSnapshot]);
+  }, [pushUndoSnapshot, selectEquipmentId]);
 
   const openEditModal = useCallback((equipment: FloorEquipment): void => {
     setModalMode('edit');
-    setSelectedEquipmentId(equipment.id);
+    setIsNameManual(true);
+    selectEquipmentId(equipment.id);
     setNewObjCoords({ x: equipment.pos_x, y: equipment.pos_y });
     setNewEquipmentForm({
       name: equipment.name,
@@ -679,7 +685,7 @@ function StoreMap() {
       shelfCount: equipment.shelf_count ?? 0,
     });
     setIsModalOpen(true);
-  }, []);
+  }, [selectEquipmentId]);
 
   const activateDuplicateModeFromSelected = useCallback((): void => {
     if (!selectedEquipmentId) {
@@ -695,6 +701,23 @@ function StoreMap() {
     setEditorMode('DUPLICATE');
     setIsModalOpen(false);
   }, [selectedEquipmentId]);
+
+  useEffect(() => {
+    if (!isModalOpen || modalMode !== 'create') {
+      return;
+    }
+    if (isNameManual) {
+      return;
+    }
+    setNewEquipmentForm((prev) => {
+      const type = prev.type as FloorEquipmentType;
+      const nextName = nextGlobalEquipmentName(zonesRef.current, type);
+      if (prev.name === nextName) {
+        return prev;
+      }
+      return { ...prev, name: nextName };
+    });
+  }, [isModalOpen, isNameManual, modalMode, newEquipmentForm.type]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
@@ -719,25 +742,29 @@ function StoreMap() {
         redo();
         return;
       }
-      if (!mod && e.key.toLowerCase() === 'a') {
+      // Физические KeyA / KeyD — поворот при любой раскладке клавиатуры (RU/EN)
+      if (!mod && (e.code === 'KeyA' || e.code === 'KeyD')) {
         e.preventDefault();
-        void rotateSelected(e.shiftKey ? -1 : -5);
+        const delta =
+          e.code === 'KeyA'
+            ? e.shiftKey
+              ? -1
+              : -5
+            : e.shiftKey
+              ? 1
+              : 5;
+        void rotateSelected(delta);
         return;
       }
-      if (!mod && e.key.toLowerCase() === 'd') {
-        e.preventDefault();
-        void rotateSelected(e.shiftKey ? 1 : 5);
-        return;
-      }
-      if (!mod && e.key.toLowerCase() === 'e') {
+      if (!mod && e.code === 'KeyE') {
         e.preventDefault();
         setEditorMode('CREATE');
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [redo, rotateSelected, undo]);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [redo, rotateSelected, undo, setEditorMode]);
 
   if (loading) {
     return (
@@ -926,12 +953,12 @@ function StoreMap() {
                         }
                         ev.stopPropagation();
                         pushUndoSnapshot();
-                        setSelectedEquipmentId(eq.id);
+                        selectEquipmentId(eq.id);
                         setDraggingItem(eq.id);
                       }}
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        setSelectedEquipmentId(eq.id);
+                        selectEquipmentId(eq.id);
                       }}
                       onDoubleClick={(ev) => {
                         ev.stopPropagation();
@@ -957,15 +984,19 @@ function StoreMap() {
 
       {isModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
+          <div className="w-full max-w-2xl rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
             <h3 className="mb-4 text-lg font-semibold text-slate-100">
               {modalMode === 'create' ? 'Новое оборудование' : 'Параметры оборудования'}
             </h3>
-            {modalMode === 'edit' ? (
-              <div className="mb-3 text-xs text-slate-300">
-                Текущий угол: <span className="font-semibold text-slate-100">{Math.round(newEquipmentForm.rotation)}°</span>
-              </div>
-            ) : null}
+            <label className="mb-3 block text-sm text-slate-300">
+              Угол поворота (текущий)
+              <input
+                type="text"
+                readOnly
+                value={`${Math.round(newEquipmentForm.rotation)}°`}
+                className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900/60 px-3 py-2 text-slate-100 outline-none"
+              />
+            </label>
 
             <div className="mb-4 grid grid-cols-2 gap-3 text-sm">
               <div className="rounded-md border border-slate-700 bg-slate-900/70 px-3 py-2 text-slate-300">
@@ -984,9 +1015,10 @@ function StoreMap() {
                 <input
                   type="text"
                   value={newEquipmentForm.name}
-                  onChange={(ev) =>
-                    setNewEquipmentForm((prev) => ({ ...prev, name: ev.target.value }))
-                  }
+                  onChange={(ev) => {
+                    setIsNameManual(true);
+                    setNewEquipmentForm((prev) => ({ ...prev, name: ev.target.value }));
+                  }}
                   className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
                   placeholder="Например, Стеллаж №5"
                 />
@@ -996,12 +1028,17 @@ function StoreMap() {
                 Тип
                 <select
                   value={newEquipmentForm.type}
-                  onChange={(ev) =>
+                  onChange={(ev) => {
+                    const nextType = ev.target.value as FloorEquipmentType;
                     setNewEquipmentForm((prev) => ({
                       ...prev,
-                      type: ev.target.value as FloorEquipmentType,
-                    }))
-                  }
+                      type: nextType,
+                      name:
+                        modalMode === 'create' && !isNameManual
+                          ? nextGlobalEquipmentName(zonesRef.current, nextType)
+                          : prev.name,
+                    }));
+                  }}
                   className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
                 >
                   <option value="shelving">Стеллаж</option>
