@@ -6,6 +6,7 @@ from .models import (
     Category,
     Company,
     Equipment,
+    EquipmentSlot,
     Inventory,
     Placement,
     PlacementTask,
@@ -213,10 +214,18 @@ class PlacementTaskAdmin(admin.ModelAdmin):
 
 @admin.register(Planogram)
 class PlanogramAdmin(admin.ModelAdmin):
-    list_display = ("id", "equipment", "product", "target_quantity")
-    list_filter = ("equipment__zone__store",)
-    search_fields = ("product__sku", "product__name", "equipment__name")
-    autocomplete_fields = ("equipment", "product")
+    list_display = ("id", "slot", "product", "target_quantity")
+    list_filter = ("slot__equipment__zone__store",)
+    search_fields = ("product__sku", "product__name", "slot__equipment__name")
+    autocomplete_fields = ("slot", "product")
+
+
+@admin.register(EquipmentSlot)
+class EquipmentSlotAdmin(admin.ModelAdmin):
+    list_display = ("id", "equipment", "row_index", "col_index", "width_percent")
+    list_filter = ("equipment__zone__store", "equipment__type")
+    search_fields = ("equipment__name",)
+    autocomplete_fields = ("equipment",)
 
 
 @admin.register(StockItem)
@@ -228,7 +237,7 @@ class StockItemAdmin(admin.ModelAdmin):
 
 @admin.register(Equipment)
 class FloorEquipmentAdmin(admin.ModelAdmin):
-    list_display = ("name", "zone", "type", "pos_x", "pos_y", "rotation", "shelf_count")
+    list_display = ("name", "zone", "type", "pos_x", "pos_y", "rotation", "rows_count")
     list_filter = ("type", "zone__store", "zone")
     search_fields = ("name", "zone__name")
     autocomplete_fields = ("zone",)

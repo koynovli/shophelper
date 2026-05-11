@@ -25,8 +25,9 @@ def reconcile_planogram(planogram: Planogram) -> None:
     stock = StockItem.objects.filter(product_id=planogram.product_id).first()
     stock_qty = int(stock.quantity) if stock else 0
 
+    equipment_id = planogram.slot.equipment_id
     on_shelf = _quantity_on_shelf_for_equipment(
-        equipment_id=planogram.equipment_id,
+        equipment_id=equipment_id,
         product_id=planogram.product_id,
     )
     needed = max(0, int(planogram.target_quantity) - on_shelf)
@@ -46,14 +47,18 @@ def reconcile_planogram(planogram: Planogram) -> None:
         status=PlacementTask.Status.PENDING,
         defaults={
             "product_id": planogram.product_id,
-            "equipment_id": planogram.equipment_id,
+            "equipment_id": equipment_id,
             "quantity": task_qty,
         },
     )
 
 
 def reconcile_for_product(product_id: int) -> None:
-    for pg in Planogram.objects.filter(product_id=product_id).select_related("equipment", "product"):
+    for pg in Planogram.objects.filter(product_id=product_id).select_related(
+        "slot",
+        "slot__equipment",
+        "product",
+    ):
         reconcile_planogram(pg)
 
 

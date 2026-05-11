@@ -321,6 +321,9 @@ class ZoneViewSet(viewsets.ModelViewSet):
 class EquipmentViewSet(viewsets.ModelViewSet):
     queryset = Equipment.objects.select_related("zone", "zone__store").prefetch_related(
         "shelves",
+        "slots",
+        "slots__planograms",
+        "slots__planograms__product",
     )
     serializer_class = EquipmentSerializer
     filterset_class = EquipmentFilter
@@ -479,11 +482,11 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
 class PlanogramFilter(filters.FilterSet):
     class Meta:
         model = Planogram
-        fields = ("equipment", "product")
+        fields = ("slot", "product")
 
 
 class PlanogramViewSet(viewsets.ModelViewSet):
-    queryset = Planogram.objects.select_related("equipment", "product").all()
+    queryset = Planogram.objects.select_related("slot", "slot__equipment", "product").all()
     filterset_class = PlanogramFilter
 
     def get_permissions(self):

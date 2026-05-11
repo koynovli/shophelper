@@ -104,8 +104,9 @@ export function MapEquipmentItem({
 
   const displayType = equipment.type === 'shelf' ? 'shelving' : equipment.type;
   const shelfLines =
-    displayType === 'shelving' && equipment.shelf_count > 0
-      ? equipment.shelf_count
+    (displayType === 'shelving' || displayType === 'fridge' || displayType === 'pegboard') &&
+    equipment.rows_count > 0
+      ? equipment.rows_count
       : 0;
 
   let borderColor = withAlpha(zoneColor, 0.92);

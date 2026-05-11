@@ -3,6 +3,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
     Equipment,
+    EquipmentSlot,
     Inventory,
     PlacementTask,
     Planogram,
@@ -34,6 +35,24 @@ class EquipmentBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipment
         fields = ("id", "name")
+
+
+class EquipmentSlotSerializer(serializers.ModelSerializer):
+    planogram = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EquipmentSlot
+        fields = ("id", "row_index", "col_index", "width_percent", "planogram")
+
+    def get_planogram(self, obj: EquipmentSlot):
+        planogram = obj.planograms.select_related("product").first()
+        if planogram is None:
+            return None
+        return {
+            "id": planogram.pk,
+            "product": ProductBriefSerializer(planogram.product).data,
+            "target_quantity": planogram.target_quantity,
+        }
 
 
 class PlacementTaskReadSerializer(serializers.ModelSerializer):
@@ -73,22 +92,30 @@ class PlacementTaskUpdateSerializer(serializers.ModelSerializer):
 
 class PlanogramReadSerializer(serializers.ModelSerializer):
     product = ProductBriefSerializer(read_only=True)
-    equipment = EquipmentBriefSerializer(read_only=True)
+    slot = serializers.SerializerMethodField()
     stock_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = Planogram
-        fields = ("id", "equipment", "product", "target_quantity", "stock_quantity")
+        fields = ("id", "slot", "product", "target_quantity", "stock_quantity")
 
     def get_stock_quantity(self, obj: Planogram) -> int:
         row = StockItem.objects.filter(product_id=obj.product_id).first()
         return int(row.quantity) if row else 0
 
+    def get_slot(self, obj: Planogram):
+        return {
+            "id": obj.slot_id,
+            "equipment_id": obj.slot.equipment_id,
+            "row_index": obj.slot.row_index,
+            "col_index": obj.slot.col_index,
+        }
+
 
 class PlanogramWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Planogram
-        fields = ("equipment", "product", "target_quantity")
+        fields = ("slot", "product", "target_quantity")
 
     def validate_target_quantity(self, value: int) -> int:
         if value < 1:
@@ -149,6 +176,7 @@ class ShelfSerializer(serializers.ModelSerializer):
 
 class EquipmentSerializer(serializers.ModelSerializer):
     shelves = ShelfSerializer(many=True, read_only=True)
+    slots = EquipmentSlotSerializer(many=True, read_only=True)
 
     class Meta:
         model = Equipment

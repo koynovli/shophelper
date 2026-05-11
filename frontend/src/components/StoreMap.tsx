@@ -59,6 +59,19 @@ function normalizeEquipmentTypeValue(type: string): FloorEquipmentType {
   return type === 'shelf' ? 'shelving' : (type as FloorEquipmentType);
 }
 
+function defaultRowsCountForType(type: FloorEquipmentType): number {
+  if (type === 'pallet') {
+    return 1;
+  }
+  if (type === 'pegboard') {
+    return 3;
+  }
+  if (type === 'shelving' || type === 'fridge') {
+    return 4;
+  }
+  return 1;
+}
+
 function nextGlobalEquipmentName(zones: FloorZone[], type: FloorEquipmentType): string {
   const label = EQUIPMENT_TYPE_LABEL_RU[type];
   const existingNames = new Set(
@@ -176,7 +189,7 @@ function StoreMap() {
     lengthCm: 60,
     rotation: 0,
     type: 'shelving' as FloorEquipmentType,
-    shelfCount: 4,
+    rowsCount: 4,
   });
   const [isSaving, setIsSaving] = useState(false);
   const [merchOpen, setMerchOpen] = useState(false);
@@ -424,7 +437,7 @@ function StoreMap() {
         lengthCm: 60,
         rotation: 0,
         type: 'shelving',
-        shelfCount: 4,
+        rowsCount: defaultRowsCountForType('shelving'),
       });
       setIsModalOpen(true);
     },
@@ -449,7 +462,7 @@ function StoreMap() {
         width: source.width,
         height: source.height,
         rotation: snapRotationDeg(source.rotation),
-        shelf_count: source.shelf_count ?? 0,
+        rows_count: source.rows_count ?? 0,
       };
 
       try {
@@ -599,7 +612,7 @@ function StoreMap() {
       lengthCm: 60,
       rotation: 0,
       type: 'shelving',
-      shelfCount: 4,
+      rowsCount: defaultRowsCountForType('shelving'),
     });
   };
 
@@ -621,7 +634,7 @@ function StoreMap() {
       width: newEquipmentForm.widthCm,
       height: newEquipmentForm.lengthCm,
       rotation: snapRotationDeg(newEquipmentForm.rotation),
-      shelf_count: newEquipmentForm.shelfCount,
+      rows_count: newEquipmentForm.rowsCount,
     };
 
     try {
@@ -745,7 +758,7 @@ function StoreMap() {
       lengthCm: equipment.height,
       rotation: equipment.rotation,
       type: normalizeEquipmentTypeValue(String(equipment.type)),
-      shelfCount: equipment.shelf_count ?? 0,
+      rowsCount: equipment.rows_count ?? 0,
     });
     setIsModalOpen(true);
   }, [selectEquipmentId]);
@@ -1250,6 +1263,10 @@ function StoreMap() {
                     setNewEquipmentForm((prev) => ({
                       ...prev,
                       type: nextType,
+                      rowsCount:
+                        modalMode === 'create'
+                          ? defaultRowsCountForType(nextType)
+                          : prev.rowsCount,
                       name:
                         modalMode === 'create' && !isNameManual
                           ? nextGlobalEquipmentName(zonesRef.current, nextType)
@@ -1300,16 +1317,16 @@ function StoreMap() {
               </div>
 
               <label className="block text-sm text-slate-300">
-                Число полок (визуал, для стеллажа)
+                Число рядов/уровней
                 <input
                   type="number"
                   min={0}
                   max={50}
-                  value={newEquipmentForm.shelfCount}
+                  value={newEquipmentForm.rowsCount}
                   onChange={(ev) =>
                     setNewEquipmentForm((prev) => ({
                       ...prev,
-                      shelfCount: Math.max(0, Math.min(50, Number(ev.target.value) || 0)),
+                      rowsCount: Math.max(0, Math.min(50, Number(ev.target.value) || 0)),
                     }))
                   }
                   className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"

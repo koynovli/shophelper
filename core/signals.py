@@ -1,7 +1,7 @@
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from .models import Inventory, Planogram, StockItem
+from .models import Equipment, EquipmentSlot, Inventory, Planogram, StockItem
 from .placement_sync import reconcile_for_product, reconcile_planogram
 
 
@@ -30,3 +30,60 @@ def inventory_saved(sender, instance: Inventory, **kwargs):
 @receiver(post_delete, sender=Inventory)
 def inventory_deleted(sender, instance: Inventory, **kwargs):
     reconcile_for_product(instance.product_id)
+
+
+def _generate_default_slots_for_equipment(equipment: Equipment) -> None:
+    if EquipmentSlot.objects.filter(equipment=equipment).exists():
+        return
+
+    eq_type = str(equipment.type)
+    rows = int(equipment.rows_count or 0)
+
+    if eq_type in (Equipment.EquipmentType.SHELVING, Equipment.EquipmentType.FRIDGE, "shelf"):
+        rows = max(rows, 1)
+        for r in range(rows):
+            for c in range(4):
+                EquipmentSlot.objects.create(
+                    equipment=equipment,
+                    row_index=r,
+                    col_index=c,
+                    width_percent=25.0,
+                )
+        return
+
+    if eq_type == Equipment.EquipmentType.PALLET:
+        EquipmentSlot.objects.create(
+            equipment=equipment,
+            row_index=0,
+            col_index=0,
+            width_percent=100.0,
+        )
+        return
+
+    if eq_type == Equipment.EquipmentType.PEGBOARD:
+        rows = max(rows, 1)
+        for r in range(rows):
+            for c in range(5):
+                EquipmentSlot.objects.create(
+                    equipment=equipment,
+                    row_index=r,
+                    col_index=c,
+                    width_percent=20.0,
+                )
+        return
+
+    # display/прочее: как базовый вариант — 1x4
+    for c in range(4):
+        EquipmentSlot.objects.create(
+            equipment=equipment,
+            row_index=0,
+            col_index=c,
+            width_percent=25.0,
+        )
+
+
+@receiver(post_save, sender=Equipment)
+def equipment_created(sender, instance: Equipment, created: bool, **kwargs):
+    if not created:
+        return
+    _generate_default_slots_for_equipment(instance)

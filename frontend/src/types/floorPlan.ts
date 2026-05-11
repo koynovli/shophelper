@@ -23,8 +23,21 @@ export interface FloorEquipment {
   width: number;
   height: number;
   rotation: number;
-  shelf_count: number;
+  rows_count: number;
   shelves: FloorShelf[];
+  slots?: EquipmentSlot[];
+}
+
+export interface EquipmentSlot {
+  id: number;
+  row_index: number;
+  col_index: number;
+  width_percent: number;
+  planogram?: {
+    id: number;
+    product: { id: number; name: string; sku: string };
+    target_quantity: number;
+  } | null;
 }
 
 export interface FloorZone {
@@ -46,12 +59,16 @@ export function normalizeFloorEquipment(raw: Record<string, unknown>): FloorEqui
       : typeof raw.orientation === 'number'
         ? raw.orientation
         : 0;
-  const shelfCount =
-    typeof raw.shelf_count === 'number'
-      ? raw.shelf_count
-      : typeof raw.shelfCount === 'number'
-        ? raw.shelfCount
-        : 0;
+  const rowsCount =
+    typeof raw.rows_count === 'number'
+      ? raw.rows_count
+      : typeof raw.shelf_count === 'number'
+        ? raw.shelf_count
+        : typeof raw.rowsCount === 'number'
+          ? raw.rowsCount
+          : typeof raw.shelfCount === 'number'
+            ? raw.shelfCount
+            : 0;
 
   return {
     id: Number(raw.id),
@@ -63,7 +80,8 @@ export function normalizeFloorEquipment(raw: Record<string, unknown>): FloorEqui
     width: Number(raw.width ?? 0),
     height: Number(raw.height ?? 0),
     rotation,
-    shelf_count: shelfCount,
+    rows_count: rowsCount,
     shelves: Array.isArray(raw.shelves) ? (raw.shelves as FloorShelf[]) : [],
+    slots: Array.isArray(raw.slots) ? (raw.slots as EquipmentSlot[]) : [],
   };
 }

@@ -597,10 +597,13 @@ class Equipment(models.Model):
         verbose_name="Поворот (°)",
         help_text="Угол поворота объекта на плане в градусах.",
     )
-    shelf_count = models.PositiveIntegerField(
+    rows_count = models.PositiveIntegerField(
         default=0,
-        verbose_name="Число полок (визуализация)",
-        help_text="Для схематичной отрисовки горизонтальных полок на карте (без связи с моделью Shelf).",
+        verbose_name="Число рядов/уровней",
+        help_text=(
+            "Количество уровней для визуализации и слотов: для стеллажа — полки, "
+            "для перфопанели — ряды крючков, для паллеты обычно 1."
+        ),
     )
 
     class Meta:
@@ -611,15 +614,55 @@ class Equipment(models.Model):
         return f"{self.name} — {self.zone}"
 
 
-class Planogram(models.Model):
-    """Планограмма торгового зала: целевое количество SKU на конкретном оборудовании."""
+class EquipmentSlot(models.Model):
+    """Ячейка (слот) на конкретном оборудовании, куда привязывается планограмма."""
 
     equipment = models.ForeignKey(
         Equipment,
         on_delete=models.CASCADE,
-        related_name="planograms",
+        related_name="slots",
         verbose_name="Оборудование",
-        help_text="Объект плана зала (стеллаж, холодильник и т.п.).",
+    )
+    row_index = models.PositiveIntegerField(
+        verbose_name="Индекс ряда",
+        help_text="Номер полки/ряда, начиная с 0.",
+    )
+    col_index = models.PositiveIntegerField(
+        verbose_name="Индекс ячейки",
+        help_text="Порядковый номер ячейки в ряду, начиная с 0.",
+    )
+    width_percent = models.FloatField(
+        default=25.0,
+        verbose_name="Ширина (%)",
+        help_text="Ширина ячейки в процентах от ширины ряда/полки.",
+    )
+
+    class Meta:
+        verbose_name = "Слот оборудования"
+        verbose_name_plural = "Слоты оборудования"
+        ordering = ("equipment_id", "row_index", "col_index")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("equipment", "row_index", "col_index"),
+                name="uniq_equipment_slot_row_col",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.equipment.name}: ряд {self.row_index}, ячейка {self.col_index}"
+
+
+class Planogram(models.Model):
+    """Планограмма торгового зала: целевое количество SKU в конкретном слоте."""
+
+    slot = models.ForeignKey(
+        EquipmentSlot,
+        on_delete=models.CASCADE,
+        related_name="planograms",
+        null=True,
+        blank=True,
+        verbose_name="Слот",
+        help_text="Слот на оборудовании, куда должен выкладываться товар.",
     )
     product = models.ForeignKey(
         Product,
@@ -638,13 +681,13 @@ class Planogram(models.Model):
         verbose_name_plural = "Планограммы (зал)"
         constraints = [
             models.UniqueConstraint(
-                fields=("equipment", "product"),
-                name="uniq_planogram_equipment_product",
+                fields=("slot", "product"),
+                name="uniq_planogram_slot_product",
             ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.equipment.name}: {self.product.name} → {self.target_quantity} шт."
+        return f"{self.slot.equipment.name} [{self.slot.row_index}:{self.slot.col_index}]: {self.product.name} → {self.target_quantity} шт."
 
 
 class StockItem(models.Model):
