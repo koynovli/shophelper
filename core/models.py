@@ -34,14 +34,13 @@ class Store(models.Model):
 
 class User(AbstractUser):
     class Role(models.TextChoices):
-        ADMIN = "admin", "Администратор сети"
-        MANAGER = "manager", "Менеджер магазина"
-        STAFF = "staff", "Мерчандайзер"
+        ADMIN = "admin", "Администратор"
+        EMPLOYEE = "employee", "Работник торгового зала"
 
     role = models.CharField(
         max_length=20,
         choices=Role.choices,
-        default=Role.STAFF,
+        default=Role.EMPLOYEE,
         verbose_name="Роль",
         help_text="Роль пользователя в системе.",
     )
@@ -68,11 +67,11 @@ class User(AbstractUser):
 
     @property
     def is_manager(self) -> bool:
-        return self.role in {self.Role.MANAGER, self.Role.ADMIN}
+        return self.role == self.Role.ADMIN
 
     @property
     def is_merchandiser(self) -> bool:
-        return self.role == self.Role.STAFF
+        return self.role == self.Role.EMPLOYEE
 
     def __str__(self) -> str:
         full_name = self.get_full_name().strip()

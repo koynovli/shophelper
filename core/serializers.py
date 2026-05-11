@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
     Equipment,
@@ -9,6 +10,7 @@ from .models import (
     Supplier,
     SupplyOrder,
     SupplyOrderItem,
+    User,
     Zone,
 )
 
@@ -67,6 +69,34 @@ class EquipmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipment
         fields = "__all__"
+
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ("id", "username", "role")
+
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token["role"] = user.role
+        token["username"] = user.username
+        token["user_id"] = user.id
+        return token
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        # Кастомные поля должны попасть и в access — иначе фронт не сможет прочитать роль из access JWT
+        refresh = self.get_token(self.user)
+        access = refresh.access_token
+        access["role"] = self.user.role
+        access["username"] = self.user.username
+        access["user_id"] = self.user.id
+        data["access"] = str(access)
+        data["refresh"] = str(refresh)
+        return data
 
 
 class ZoneSerializer(serializers.ModelSerializer):

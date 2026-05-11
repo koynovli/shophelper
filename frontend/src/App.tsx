@@ -1,8 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, Factory, Map, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
+import { CalendarDays, Factory, LogOut, Map, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 
 import api from './api';
+import { ProtectedRoute } from './auth/ProtectedRoute';
+import { useAuth } from './auth/AuthContext';
 import StoreMap from './components/StoreMap';
+import { EmployeeDashboard } from './pages/EmployeeDashboard';
+import { LoginPage } from './pages/LoginPage';
+import { NoAccess } from './pages/NoAccess';
 
 type Supplier = {
   id: number;
@@ -32,6 +38,13 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 function App() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = (): void => {
+    logout();
+    navigate('/login', { replace: true });
+  };
   const [orders, setOrders] = useState<SupplyOrder[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<'orders' | 'map'>('orders');
@@ -83,7 +96,14 @@ function App() {
   const getStatusStyle = (status: string): string =>
     STATUS_STYLES[status] ?? 'bg-slate-700/60 text-slate-200 border-slate-600';
 
-  return (
+  const HomeRedirect = (): React.ReactElement => {
+    if (!user) {
+      return <Navigate to="/login" replace />;
+    }
+    return <Navigate to={user.role === 'admin' ? '/admin' : '/employee'} replace />;
+  };
+
+  const AdminShell = (): React.ReactElement => (
     <div className="min-h-screen bg-slate-950 px-4 py-8 font-sans text-slate-200 sm:px-6 lg:px-8">
       <header className="mx-auto mb-8 flex w-full max-w-5xl items-center justify-between border-b border-slate-800 pb-6">
         <div className="flex items-center gap-3">
@@ -92,8 +112,20 @@ function App() {
             ShopHelper UI
           </h1>
         </div>
-        <div className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-400">
-          Dark Control Panel
+        <div className="flex items-center gap-3">
+          {user ? (
+            <span className="hidden text-sm text-slate-400 sm:inline">
+              {user.username}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="inline-flex items-center gap-2 rounded-full border border-slate-600 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-rose-500/50 hover:bg-rose-950/30 hover:text-rose-100"
+          >
+            <LogOut className="h-4 w-4" />
+            Выйти
+          </button>
         </div>
       </header>
 
@@ -190,6 +222,24 @@ function App() {
         )}
       </main>
     </div>
+  );
+
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/no-access" element={<NoAccess />} />
+      <Route path="/" element={<HomeRedirect />} />
+
+      <Route element={<ProtectedRoute allowedRoles={['admin']} />}>
+        <Route path="/admin" element={<AdminShell />} />
+      </Route>
+
+      <Route element={<ProtectedRoute allowedRoles={['employee']} />}>
+        <Route path="/employee" element={<EmployeeDashboard />} />
+      </Route>
+
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
 

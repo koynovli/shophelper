@@ -1,5 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .views import (
     EquipmentViewSet,
@@ -10,6 +12,7 @@ from .views import (
     SupplyOrderViewSet,
     ZoneViewSet,
 )
+from .serializers import CustomTokenObtainPairSerializer
 
 router = DefaultRouter()
 router.register(r"supply-orders", SupplyOrderViewSet, basename="supplyorder")
@@ -20,6 +23,8 @@ router.register(r"shelves", ShelfViewSet, basename="shelf")
 router.register(r"inventory", InventoryViewSet, basename="inventory")
 
 urlpatterns = [
+    path("token/", TokenObtainPairView.as_view(serializer_class=CustomTokenObtainPairSerializer), name="token_obtain_pair"),
+    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("scan/", ScanCodeView.as_view(), name="scan-code"),
     path("", include(router.urls)),
 ]
