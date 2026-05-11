@@ -659,8 +659,6 @@ class Planogram(models.Model):
         EquipmentSlot,
         on_delete=models.CASCADE,
         related_name="planograms",
-        null=True,
-        blank=True,
         verbose_name="Слот",
         help_text="Слот на оборудовании, куда должен выкладываться товар.",
     )
