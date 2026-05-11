@@ -27,7 +27,12 @@ import {
 import api from '../api';
 import type { AxiosError } from 'axios';
 import { useMapEditMode } from '../map/MapEditModeContext';
-import type { FloorEquipment, FloorEquipmentType, FloorZone } from '../types/floorPlan';
+import type {
+  EquipmentSlot,
+  FloorEquipment,
+  FloorEquipmentType,
+  FloorZone,
+} from '../types/floorPlan';
 import { normalizeFloorEquipment } from '../types/floorPlan';
 import {
   magneticSnapTopLeftPx,
@@ -90,14 +95,6 @@ type ProductBrief = {
   id: number;
   name: string;
   sku: string;
-};
-
-type PlanogramRow = {
-  id: number;
-  equipment: { id: number; name: string };
-  product: { id: number; name: string; sku: string };
-  target_quantity: number;
-  stock_quantity: number;
 };
 
 type MerchTaskRow = {
@@ -195,7 +192,7 @@ function StoreMap() {
   const [merchOpen, setMerchOpen] = useState(false);
   const [merchEquipmentId, setMerchEquipmentId] = useState<number | null>(null);
   const [merchEquipmentName, setMerchEquipmentName] = useState('');
-  const [merchPlanograms, setMerchPlanograms] = useState<PlanogramRow[]>([]);
+  const [selectedSlotId, setSelectedSlotId] = useState<number | null>(null);
   const [merchTasks, setMerchTasks] = useState<MerchTaskRow[]>([]);
   const [merchProducts, setMerchProducts] = useState<ProductBrief[]>([]);
   const [merchProductId, setMerchProductId] = useState('');
@@ -351,6 +348,20 @@ function StoreMap() {
   const isCreateMode = editorMode === 'CREATE';
   const isDuplicateMode = editorMode === 'DUPLICATE';
   const selectedEquipment = allEquipment.find((eq) => eq.id === selectedEquipmentId) ?? null;
+  const merchEquipment = allEquipment.find((eq) => eq.id === merchEquipmentId) ?? null;
+  const merchSlotsSorted = useMemo(
+    () =>
+      [...(merchEquipment?.slots ?? [])].sort((a, b) =>
+        a.row_index === b.row_index
+          ? a.col_index - b.col_index
+          : a.row_index - b.row_index,
+      ),
+    [merchEquipment?.slots],
+  );
+  const selectedSlot = useMemo(
+    () => merchSlotsSorted.find((s) => s.id === selectedSlotId) ?? null,
+    [merchSlotsSorted, selectedSlotId],
+  );
 
   const pushUndoSnapshot = useCallback((): void => {
     undoStackRef.current.push(cloneZones(zonesRef.current));
@@ -795,23 +806,42 @@ function StoreMap() {
     });
   }, [isModalOpen, isNameManual, modalMode, newEquipmentForm.type]);
 
+  const refreshEquipmentFromServer = useCallback(async (equipmentId: number): Promise<FloorEquipment> => {
+    const eqRes = await api.get(`/floor-equipment/${equipmentId}/`);
+    const normalized = normalizeFloorEquipment(eqRes.data as Record<string, unknown>);
+    setZones((prev) =>
+      prev.map((z) => ({
+        ...z,
+        equipment: z.equipment.map((eq) => (eq.id === normalized.id ? { ...eq, ...normalized } : eq)),
+      })),
+    );
+    return normalized;
+  }, []);
+
   const fetchMerchData = useCallback(async (equipmentId: number): Promise<void> => {
     setMerchLoading(true);
     setMerchFeedback(null);
     try {
-      const [pgRes, taskRes, prodRes] = await Promise.all([
-        api.get('/planograms/', { params: { equipment: equipmentId } }),
+      const [taskRes, prodRes] = await Promise.all([
         api.get('/placement-tasks/', { params: { equipment: equipmentId, status: 'PENDING' } }),
         api.get('/products/'),
       ]);
-      const pgList = extractApiList<PlanogramRow>(pgRes.data);
       const taskList = extractApiList<MerchTaskRow>(taskRes.data);
       const prods = extractApiList<ProductBrief>(prodRes.data).sort((a, b) =>
         a.name.localeCompare(b.name, 'ru'),
       );
-      setMerchPlanograms(pgList);
       setMerchTasks(taskList);
       setMerchProducts(prods);
+      const freshEquipment = await refreshEquipmentFromServer(equipmentId);
+      const sortedSlots = [...(freshEquipment.slots ?? [])].sort((a, b) =>
+        a.row_index === b.row_index ? a.col_index - b.col_index : a.row_index - b.row_index,
+      );
+      setSelectedSlotId((prev) => {
+        if (prev && sortedSlots.some((s) => s.id === prev)) {
+          return prev;
+        }
+        return sortedSlots[0]?.id ?? null;
+      });
       setMerchProductId((prev) => {
         if (prev && prods.some((p) => String(p.id) === prev)) {
           return prev;
@@ -819,22 +849,40 @@ function StoreMap() {
         return prods[0] ? String(prods[0].id) : '';
       });
     } catch {
-      setMerchFeedback({ type: 'err', text: 'Не удалось загрузить планограмму и задачи.' });
+      setMerchFeedback({ type: 'err', text: 'Не удалось загрузить слоты, задачи или товары.' });
     } finally {
       setMerchLoading(false);
     }
-  }, []);
+  }, [refreshEquipmentFromServer]);
 
   const openMerchModal = useCallback(
     (equipment: FloorEquipment): void => {
       setMerchEquipmentId(equipment.id);
       setMerchEquipmentName(equipment.name);
+      const sortedSlots = [...(equipment.slots ?? [])].sort((a, b) =>
+        a.row_index === b.row_index
+          ? a.col_index - b.col_index
+          : a.row_index - b.row_index,
+      );
+      setSelectedSlotId(sortedSlots[0]?.id ?? null);
       setMerchOpen(true);
       setMerchTargetQty(1);
       void fetchMerchData(equipment.id);
     },
     [fetchMerchData],
   );
+
+  useEffect(() => {
+    if (!selectedSlot) {
+      return;
+    }
+    if (selectedSlot.planogram) {
+      setMerchProductId(String(selectedSlot.planogram.product.id));
+      setMerchTargetQty(selectedSlot.planogram.target_quantity);
+      return;
+    }
+    setMerchTargetQty(1);
+  }, [selectedSlot]);
 
   const handleMerchCreateTestProduct = useCallback(async (): Promise<void> => {
     if (!merchEquipmentId) {
@@ -868,6 +916,10 @@ function StoreMap() {
       setMerchFeedback({ type: 'err', text: 'Не выбрано оборудование.' });
       return;
     }
+    if (!selectedSlot) {
+      setMerchFeedback({ type: 'err', text: 'Выберите слот в матрице.' });
+      return;
+    }
     const pid = Number(merchProductId);
     if (!pid || Number.isNaN(pid)) {
       setMerchFeedback({ type: 'err', text: 'Выберите товар.' });
@@ -877,13 +929,20 @@ function StoreMap() {
     try {
       setMerchSaving(true);
       setMerchFeedback(null);
-      await api.post('/planograms/', {
-        equipment: merchEquipmentId,
-        product: pid,
-        target_quantity: tq,
-      });
-      setMerchFeedback({ type: 'ok', text: 'Позиция планограммы добавлена.' });
-      setMerchTargetQty(1);
+      if (selectedSlot.planogram) {
+        await api.patch(`/planograms/${selectedSlot.planogram.id}/`, {
+          slot: selectedSlot.id,
+          product: pid,
+          target_quantity: tq,
+        });
+      } else {
+        await api.post('/planograms/', {
+          slot: selectedSlot.id,
+          product: pid,
+          target_quantity: tq,
+        });
+      }
+      setMerchFeedback({ type: 'ok', text: 'Слот планограммы сохранен.' });
       await fetchMerchData(merchEquipmentId);
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
@@ -893,16 +952,20 @@ function StoreMap() {
         text:
           typeof d === 'string'
             ? d
-            : 'Не удалось добавить (возможно, товар уже в планограмме этой полки).',
+            : 'Не удалось сохранить слот (проверьте уникальность товара в слоте).',
       });
     } finally {
       setMerchSaving(false);
     }
-  }, [fetchMerchData, merchEquipmentId, merchProductId, merchTargetQty]);
+  }, [fetchMerchData, merchEquipmentId, merchProductId, merchTargetQty, selectedSlot]);
 
   const handleDeletePlanogram = useCallback(
-    async (planogramId: number): Promise<void> => {
+    async (): Promise<void> => {
       if (!merchEquipmentId) {
+        return;
+      }
+      if (!selectedSlot?.planogram) {
+        setMerchFeedback({ type: 'err', text: 'В выбранном слоте нечего очищать.' });
         return;
       }
       if (!window.confirm('Удалить позицию из планограммы?')) {
@@ -910,8 +973,8 @@ function StoreMap() {
       }
       try {
         setMerchSaving(true);
-        await api.delete(`/planograms/${planogramId}/`);
-        setMerchFeedback({ type: 'ok', text: 'Удалено из планограммы.' });
+        await api.delete(`/planograms/${selectedSlot.planogram.id}/`);
+        setMerchFeedback({ type: 'ok', text: 'Слот очищен.' });
         await fetchMerchData(merchEquipmentId);
       } catch {
         setMerchFeedback({ type: 'err', text: 'Не удалось удалить.' });
@@ -919,7 +982,7 @@ function StoreMap() {
         setMerchSaving(false);
       }
     },
-    [fetchMerchData, merchEquipmentId],
+    [fetchMerchData, merchEquipmentId, selectedSlot],
   );
 
   useEffect(() => {
@@ -1416,87 +1479,127 @@ function StoreMap() {
             ) : null}
 
             <div className="mb-6 border-b border-slate-600 pb-5">
-              <h4 className="mb-2 text-sm font-semibold text-slate-200">Планограмма полки</h4>
+              <h4 className="mb-2 text-sm font-semibold text-slate-200">Матрица слотов</h4>
               {merchLoading ? (
                 <p className="text-xs text-slate-500">Загрузка…</p>
-              ) : merchPlanograms.length === 0 ? (
-                <p className="text-xs text-slate-500">Пока нет позиций. Добавьте товар и целевое количество.</p>
+              ) : !merchEquipment ? (
+                <p className="text-xs text-slate-500">Оборудование не найдено.</p>
               ) : (
-                <ul className="space-y-2">
-                  {merchPlanograms.map((row) => (
-                    <li
-                      key={row.id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-600 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
-                    >
-                      <span>
-                        <span className="font-medium text-slate-100">{row.product.name}</span>
-                        <span className="text-slate-500"> — цель {row.target_quantity} шт.</span>
-                        <span className="block text-xs text-slate-500">
-                          На складе: {row.stock_quantity} шт.
-                        </span>
-                      </span>
-                      <button
-                        type="button"
-                        disabled={merchSaving}
-                        onClick={() => void handleDeletePlanogram(row.id)}
-                        className="shrink-0 rounded border border-rose-500/50 px-2 py-1 text-xs text-rose-100 hover:bg-rose-950/40 disabled:opacity-50"
-                      >
-                        Удалить
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <div className="space-y-2">
+                  {Array.from({ length: Math.max(1, merchEquipment.rows_count || 1) }).map((_, rowIndex) => {
+                    const rowSlots = merchSlotsSorted.filter((s) => s.row_index === rowIndex);
+                    return (
+                      <div key={rowIndex} className="rounded-lg border border-slate-700 bg-slate-900/50 p-2">
+                        <p className="mb-2 text-[11px] uppercase tracking-wide text-slate-500">
+                          Ряд {rowIndex}
+                        </p>
+                        <div className="flex min-h-[72px] gap-2">
+                          {rowSlots.map((slot) => {
+                            const isActive = slot.id === selectedSlotId;
+                            const hasPlanogram = Boolean(slot.planogram);
+                            return (
+                              <button
+                                key={slot.id}
+                                type="button"
+                                onClick={() => setSelectedSlotId(slot.id)}
+                                style={{ width: `${slot.width_percent}%` }}
+                                className={`min-h-[72px] rounded-md border px-2 py-2 text-left text-xs transition ${
+                                  hasPlanogram
+                                    ? 'border-emerald-600/60 bg-emerald-900/25 text-emerald-100'
+                                    : 'border-slate-600 bg-slate-800/70 text-slate-300'
+                                } ${isActive ? 'ring-2 ring-indigo-400/80' : 'hover:border-slate-500'}`}
+                              >
+                                {slot.planogram ? (
+                                  <>
+                                    <div className="font-semibold">{slot.planogram.product.name}</div>
+                                    <div className="mt-1 text-[11px] text-emerald-200/90">
+                                      Цель: {slot.planogram.target_quantity} шт.
+                                    </div>
+                                  </>
+                                ) : (
+                                  <span className="text-slate-400">+ Добавить товар</span>
+                                )}
+                              </button>
+                            );
+                          })}
+                          {rowSlots.length === 0 ? (
+                            <div className="flex min-h-[72px] w-full items-center rounded-md border border-dashed border-slate-700 px-2 text-xs text-slate-500">
+                              Нет слотов в этом ряду
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
-              <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-                <label className="min-w-0 flex-1 text-sm text-slate-300">
-                  Товар
-                  <select
-                    value={merchProductId}
-                    onChange={(ev) => setMerchProductId(ev.target.value)}
-                    disabled={merchLoading || merchProducts.length === 0}
-                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
+
+              <div className="mt-4 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                <h5 className="text-sm font-semibold text-slate-200">
+                  {selectedSlot
+                    ? `Редактирование слота: ряд ${selectedSlot.row_index}, ячейка ${selectedSlot.col_index}`
+                    : 'Выберите слот для редактирования'}
+                </h5>
+                <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                  <label className="min-w-0 flex-1 text-sm text-slate-300">
+                    Товар
+                    <select
+                      value={merchProductId}
+                      onChange={(ev) => setMerchProductId(ev.target.value)}
+                      disabled={merchLoading || merchProducts.length === 0 || !selectedSlot}
+                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
+                    >
+                      {merchProducts.length === 0 ? (
+                        <option value="">Нет товаров</option>
+                      ) : (
+                        merchProducts.map((p) => (
+                          <option key={p.id} value={String(p.id)}>
+                            {p.name} ({p.sku})
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  <label className="w-full text-sm text-slate-300 sm:w-28">
+                    Цель, шт.
+                    <input
+                      type="number"
+                      min={1}
+                      value={merchTargetQty}
+                      onChange={(ev) =>
+                        setMerchTargetQty(Math.max(1, Number(ev.target.value) || 1))
+                      }
+                      disabled={!selectedSlot}
+                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={merchSaving || merchLoading || !merchProductId || !selectedSlot}
+                    onClick={() => void handleAddPlanogram()}
+                    className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                   >
-                    {merchProducts.length === 0 ? (
-                      <option value="">Нет товаров</option>
-                    ) : (
-                      merchProducts.map((p) => (
-                        <option key={p.id} value={String(p.id)}>
-                          {p.name} ({p.sku})
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
-                <label className="w-full text-sm text-slate-300 sm:w-28">
-                  Цель, шт.
-                  <input
-                    type="number"
-                    min={1}
-                    value={merchTargetQty}
-                    onChange={(ev) =>
-                      setMerchTargetQty(Math.max(1, Number(ev.target.value) || 1))
-                    }
-                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
-                  />
-                </label>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={merchSaving || merchLoading || !merchProductId}
-                  onClick={() => void handleAddPlanogram()}
-                  className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                >
-                  Добавить в планограмму
-                </button>
-                <button
-                  type="button"
-                  disabled={merchSaving}
-                  onClick={() => void handleMerchCreateTestProduct()}
-                  className="rounded-md border border-slate-500 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
-                >
-                  Создать тестовый товар
-                </button>
+                    Сохранить
+                  </button>
+                  <button
+                    type="button"
+                    disabled={merchSaving || !selectedSlot?.planogram}
+                    onClick={() => void handleDeletePlanogram()}
+                    className="rounded-md border border-rose-500/60 bg-rose-900/30 px-4 py-2 text-sm font-medium text-rose-100 hover:bg-rose-900/45 disabled:opacity-50"
+                  >
+                    Очистить слот
+                  </button>
+                  <button
+                    type="button"
+                    disabled={merchSaving}
+                    onClick={() => void handleMerchCreateTestProduct()}
+                    className="rounded-md border border-slate-500 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    Создать тестовый товар
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1526,6 +1629,7 @@ function StoreMap() {
                 onClick={() => {
                   setMerchOpen(false);
                   setMerchEquipmentId(null);
+                  setSelectedSlotId(null);
                   setMerchFeedback(null);
                 }}
                 className="rounded-md border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-slate-300 hover:border-slate-500"
