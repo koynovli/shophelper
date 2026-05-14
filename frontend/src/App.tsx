@@ -1,6 +1,17 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, ClipboardList, Factory, Inbox, LogOut, Map, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
-import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import {
+  Boxes,
+  CalendarDays,
+  ClipboardList,
+  Factory,
+  Inbox,
+  LogOut,
+  Map,
+  ReceiptText,
+  ShoppingCart,
+  Tag,
+} from 'lucide-react';
+import { Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom';
 
 import api from './api';
 import { ProtectedRoute } from './auth/ProtectedRoute';
@@ -11,8 +22,13 @@ import { TaskControlCenter } from './components/TaskControlCenter';
 import { MapEditModeProvider } from './map/MapEditModeContext';
 import { MapModeToolbar } from './components/MapModeToolbar';
 import { EmployeeDashboard } from './pages/EmployeeDashboard';
+import { InventoryDashboard } from './pages/InventoryDashboard';
 import { LoginPage } from './pages/LoginPage';
 import { NoAccess } from './pages/NoAccess';
+
+type AdminTab = 'orders' | 'map' | 'receiving' | 'tasks' | 'inventory';
+
+const VALID_ADMIN_TABS: AdminTab[] = ['orders', 'map', 'receiving', 'tasks', 'inventory'];
 
 type Supplier = {
   id: number;
@@ -51,7 +67,6 @@ function App() {
   };
   const [orders, setOrders] = useState<SupplyOrder[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'orders' | 'map' | 'receiving' | 'tasks'>('orders');
 
   useEffect(() => {
     const fetchOrders = async (): Promise<void> => {
@@ -108,9 +123,52 @@ function App() {
   };
 
   const AdminShellInner = (): React.ReactElement => {
+    const [searchParams, setSearchParams] = useSearchParams();
+    const tabParam = searchParams.get('tab');
+    const initialTab: AdminTab = VALID_ADMIN_TABS.includes(tabParam as AdminTab) ? (tabParam as AdminTab) : 'orders';
+    const [activeTab, setActiveTabState] = useState<AdminTab>(initialTab);
+
+    useEffect(() => {
+      const t = searchParams.get('tab');
+      if (t && VALID_ADMIN_TABS.includes(t as AdminTab)) {
+        setActiveTabState(t as AdminTab);
+      }
+    }, [searchParams]);
+
+    const setTab = (tab: AdminTab): void => {
+      setActiveTabState(tab);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set('tab', tab);
+          if (tab !== 'map') {
+            next.delete('equipmentId');
+          }
+          return next;
+        },
+        { replace: true },
+      );
+    };
+
+    const equipmentRaw = searchParams.get('equipmentId');
+    const parsedEquipment = equipmentRaw ? Number(equipmentRaw) : NaN;
+    const mapHighlightId =
+      activeTab === 'map' && Number.isFinite(parsedEquipment) ? parsedEquipment : null;
+
+    const clearMapHighlight = (): void => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete('equipmentId');
+          return next;
+        },
+        { replace: true },
+      );
+    };
+
     return (
     <div className="min-h-screen bg-slate-950 px-4 py-8 font-sans text-slate-200 sm:px-6 lg:px-8">
-      <header className="mx-auto mb-8 flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-6">
+      <header className="mx-auto mb-8 flex w-full max-w-7xl flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-6">
         <div className="flex items-center gap-3">
           <ShoppingCart className="h-8 w-8 text-emerald-400" />
           <h1 className="text-2xl font-bold tracking-tight text-white">
@@ -134,11 +192,11 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-5xl">
-        <div className="mb-5 flex items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900 p-2">
+      <main className="mx-auto w-full max-w-7xl">
+        <div className="mb-5 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900 p-2">
           <button
             type="button"
-            onClick={() => setActiveTab('orders')}
+            onClick={() => setTab('orders')}
             className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === 'orders'
                 ? 'bg-emerald-500/20 text-emerald-200'
@@ -150,7 +208,7 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('map')}
+            onClick={() => setTab('map')}
             className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === 'map'
                 ? 'bg-indigo-500/20 text-indigo-200'
@@ -162,7 +220,7 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('receiving')}
+            onClick={() => setTab('receiving')}
             className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === 'receiving'
                 ? 'bg-emerald-500/20 text-emerald-200'
@@ -174,7 +232,7 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('tasks')}
+            onClick={() => setTab('tasks')}
             className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === 'tasks'
                 ? 'bg-amber-500/20 text-amber-200'
@@ -183,6 +241,18 @@ function App() {
           >
             <ClipboardList className="h-4 w-4" />
             Центр задач
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('inventory')}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'inventory'
+                ? 'bg-sky-500/20 text-sky-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <Boxes className="h-4 w-4" />
+            Учёт товаров
           </button>
         </div>
 
@@ -247,10 +317,15 @@ function App() {
         ) : activeTab === 'map' ? (
           <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-4 shadow-2xl">
             <MapModeToolbar className="mb-4" />
-            <StoreMap />
+            <StoreMap
+              highlightEquipmentId={mapHighlightId}
+              onHighlightConsumed={clearMapHighlight}
+            />
           </div>
         ) : activeTab === 'receiving' ? (
           <ReceivingPanel />
+        ) : activeTab === 'inventory' ? (
+          <InventoryDashboard />
         ) : (
           <TaskControlCenter />
         )}

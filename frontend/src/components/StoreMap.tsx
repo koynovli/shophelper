@@ -167,7 +167,12 @@ function MapZoomToolbar() {
   );
 }
 
-function StoreMap() {
+type StoreMapProps = {
+  highlightEquipmentId?: number | null;
+  onHighlightConsumed?: () => void;
+};
+
+function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMapProps): React.ReactElement {
   const { isEditMode } = useMapEditMode();
   const [zones, setZones] = useState<FloorZone[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -230,6 +235,19 @@ function StoreMap() {
       setDraggingItem(null);
     }
   }, [isEditMode]);
+
+  useEffect(() => {
+    if (highlightEquipmentId == null || Number.isNaN(highlightEquipmentId)) {
+      return;
+    }
+    const exists = zonesRef.current
+      .flatMap((z) => z.equipment)
+      .some((eq) => eq.id === highlightEquipmentId);
+    if (exists) {
+      selectEquipmentId(highlightEquipmentId);
+      onHighlightConsumed?.();
+    }
+  }, [highlightEquipmentId, zones, selectEquipmentId, onHighlightConsumed]);
 
   useEffect(() => {
     const fetchZones = async (): Promise<void> => {

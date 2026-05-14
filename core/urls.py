@@ -4,6 +4,11 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from .product_tracking import (
+    ProductTrackingCategoriesView,
+    ProductTrackingDetailView,
+    ProductTrackingListView,
+)
 from .views import (
     EquipmentViewSet,
     InventoryViewSet,
@@ -32,6 +37,21 @@ router.register(r"planograms", PlanogramViewSet, basename="planogram")
 router.register(r"stock-items", StockItemViewSet, basename="stockitem")
 
 urlpatterns = [
+    path(
+        "product-tracking/categories/",
+        ProductTrackingCategoriesView.as_view(),
+        name="product-tracking-categories",
+    ),
+    path(
+        "product-tracking/<int:pk>/",
+        ProductTrackingDetailView.as_view(),
+        name="product-tracking-detail",
+    ),
+    path(
+        "product-tracking/",
+        ProductTrackingListView.as_view(),
+        name="product-tracking-list",
+    ),
     path(
         "token/",
         TokenObtainPairView.as_view(
