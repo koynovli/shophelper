@@ -42,12 +42,38 @@ def _reserve_from_batches(product_id: int, requested_qty: int) -> int:
     return reserved
 
 
+def release_placement_task_reservation(product_id: int, qty: int) -> None:
+    """
+    Возвращает резерв задачи на выкладку: увеличивает StockItem и зачисляет
+    количество в партию с ближайшим сроком годности (приближение к обратному FEFO).
+    """
+    if qty <= 0:
+        return
+    stock = StockItem.objects.select_for_update().filter(product_id=product_id).first()
+    if stock is None:
+        StockItem.objects.create(product_id=product_id, quantity=qty)
+    else:
+        stock.quantity = int(stock.quantity) + qty
+        stock.save(update_fields=["quantity"])
+
+    batch = (
+        ProductBatch.objects.select_for_update()
+        .filter(product_id=product_id)
+        .order_by("expiration_date", "pk")
+        .first()
+    )
+    if batch is not None:
+        batch.current_quantity = int(batch.current_quantity) + qty
+        batch.is_active = True
+        batch.save(update_fields=["current_quantity", "is_active"])
+
+
 def reconcile_planogram(planogram: Planogram) -> None:
     """
-    Автоматически создаёт новую задачу пополнения и резервирует склад.
+    Резервирует склад под дефицит планограммы (цель минус уже выложенное минус «в пути»).
 
-    Дефицит считается как target_quantity - сумма PENDING-задач для этой планограммы.
-    При создании задачи количество резерва вычитается из StockItem.quantity.
+    Уже выполненные задачи (COMPLETED) считаются товаром на витрине по этой планограмме.
+    PENDING и IN_PROGRESS — зарезервировано со склада, но ещё не отмечено как выложенное.
     """
     with transaction.atomic():
         pg = (
@@ -55,23 +81,34 @@ def reconcile_planogram(planogram: Planogram) -> None:
             .select_related("slot", "slot__equipment", "product")
             .get(pk=planogram.pk)
         )
+
+        completed_sum = (
+            PlacementTask.objects.filter(
+                planogram_id=pg.pk,
+                status=PlacementTask.Status.COMPLETED,
+            ).aggregate(total=Sum("quantity"))["total"]
+        )
+        completed_qty = int(completed_sum or 0)
+
+        open_qs = PlacementTask.objects.select_for_update().filter(
+            planogram_id=pg.pk,
+            status__in=(
+                PlacementTask.Status.PENDING,
+                PlacementTask.Status.IN_PROGRESS,
+            ),
+        )
+        reserved_qty = int(open_qs.aggregate(total=Sum("quantity"))["total"] or 0)
+
+        deficit = int(pg.target_quantity) - completed_qty - reserved_qty
+        if deficit <= 0:
+            return
+
         stock = (
             StockItem.objects.select_for_update()
             .filter(product_id=pg.product_id)
             .first()
         )
         if stock is None or int(stock.quantity) <= 0:
-            return
-
-        pending_sum = (
-            PlacementTask.objects.filter(
-                planogram_id=pg.pk,
-                status=PlacementTask.Status.PENDING,
-            ).aggregate(total=Sum("quantity"))["total"]
-        )
-        reserved_qty = int(pending_sum or 0)
-        deficit = int(pg.target_quantity) - reserved_qty
-        if deficit <= 0:
             return
 
         stock_qty = int(stock.quantity)
@@ -85,24 +122,31 @@ def reconcile_planogram(planogram: Planogram) -> None:
             or 0
         )
         effective_stock_qty = min(stock_qty, int(batch_available)) if int(batch_available) > 0 else stock_qty
-        task_qty = min(deficit, effective_stock_qty)
-        if task_qty <= 0:
+        add_qty = min(deficit, effective_stock_qty)
+        if add_qty <= 0:
             return
 
-        reserved_from_batches = _reserve_from_batches(pg.product_id, task_qty)
+        reserved_from_batches = _reserve_from_batches(pg.product_id, add_qty)
         if int(batch_available) > 0:
-            task_qty = min(task_qty, reserved_from_batches)
-            if task_qty <= 0:
+            add_qty = min(add_qty, reserved_from_batches)
+            if add_qty <= 0:
                 return
 
-        PlacementTask.objects.create(
-            planogram_id=pg.pk,
-            product_id=pg.product_id,
-            equipment_id=pg.slot.equipment_id,
-            quantity=task_qty,
-            status=PlacementTask.Status.PENDING,
-        )
-        stock.quantity = stock_qty - task_qty
+        existing = open_qs.filter(status=PlacementTask.Status.PENDING).first()
+        if existing is None:
+            existing = open_qs.filter(status=PlacementTask.Status.IN_PROGRESS).first()
+        if existing is not None:
+            existing.quantity = int(existing.quantity) + add_qty
+            existing.save(update_fields=["quantity"])
+        else:
+            PlacementTask.objects.create(
+                planogram_id=pg.pk,
+                product_id=pg.product_id,
+                equipment_id=pg.slot.equipment_id,
+                quantity=add_qty,
+                status=PlacementTask.Status.PENDING,
+            )
+        stock.quantity = stock_qty - add_qty
         stock.save(update_fields=["quantity"])
 
 

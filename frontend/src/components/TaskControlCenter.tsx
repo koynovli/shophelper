@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import type { AxiosError } from 'axios';
 
 import api from '../api';
@@ -41,10 +41,15 @@ export function TaskControlCenter(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<number | null>(null);
 
-  const loadData = async (): Promise<void> => {
+  const loadData = useCallback(async (): Promise<void> => {
     setError(null);
     try {
-      const [tasksRes, eqRes] = await Promise.all([api.get('/placement-tasks/'), api.get('/floor-equipment/')]);
+      const taskParams =
+        statusFilter === 'ALL' ? undefined : { status: statusFilter };
+      const [tasksRes, eqRes] = await Promise.all([
+        api.get('/placement-tasks/', { params: taskParams }),
+        api.get('/floor-equipment/'),
+      ]);
       setTasks(extractList<TaskRow>(tasksRes.data));
       setEquipment(extractList<EquipmentRow>(eqRes.data));
     } catch {
@@ -54,11 +59,11 @@ export function TaskControlCenter(): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  };
+  }, [statusFilter]);
 
   useEffect(() => {
     void loadData();
-  }, []);
+  }, [loadData]);
 
   const patchTask = async (id: number, payload: Record<string, unknown>): Promise<void> => {
     try {
@@ -73,8 +78,6 @@ export function TaskControlCenter(): React.ReactElement {
       setSavingId(null);
     }
   };
-
-  const filtered = statusFilter === 'ALL' ? tasks : tasks.filter((task) => task.status === statusFilter);
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
@@ -112,7 +115,7 @@ export function TaskControlCenter(): React.ReactElement {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((task) => (
+              {tasks.map((task) => (
                 <tr key={task.id} className="border-t border-slate-800">
                   <td className="px-2 py-2 text-slate-200">{STATUS_LABELS[task.status] ?? task.status}</td>
                   <td className="px-2 py-2 text-slate-200">{task.product.name}</td>
@@ -125,14 +128,22 @@ export function TaskControlCenter(): React.ReactElement {
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        disabled={savingId === task.id || task.status === 'CANCELLED'}
+                        disabled={
+                          savingId === task.id ||
+                          task.status === 'CANCELLED' ||
+                          task.status === 'COMPLETED'
+                        }
                         onClick={() => void patchTask(task.id, { status: 'CANCELLED' })}
                         className="rounded border border-rose-500/70 bg-rose-900/25 px-2 py-1 text-xs text-rose-100 disabled:opacity-50"
                       >
                         Отменить
                       </button>
                       <select
-                        disabled={savingId === task.id}
+                        disabled={
+                          savingId === task.id ||
+                          task.status === 'COMPLETED' ||
+                          task.status === 'CANCELLED'
+                        }
                         value={task.equipment.id}
                         onChange={(event) => void patchTask(task.id, { equipment: Number(event.target.value) })}
                         className="rounded border border-slate-600 bg-slate-950 px-2 py-1 text-xs text-slate-100"

@@ -126,7 +126,7 @@ export function ReceivingPanel(): React.ReactElement {
           />
         </label>
         <label className="text-sm text-slate-300">
-          Expiry Date
+          Срок годности
           <input
             type="date"
             value={expiryDate}

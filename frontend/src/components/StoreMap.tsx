@@ -258,18 +258,23 @@ function StoreMap() {
     fetchZones();
   }, []);
 
+  const loadPendingTaskEquipmentIds = useCallback(async (): Promise<void> => {
+    if (isEditMode) {
+      setPendingTaskEquipmentIds(new Set());
+      return;
+    }
+    try {
+      const response = await api.get('/placement-tasks/', { params: { status: 'PENDING' } });
+      const rows = extractApiList<MerchTaskRow>(response.data);
+      setPendingTaskEquipmentIds(new Set(rows.map((row) => row.equipment.id)));
+    } catch {
+      setPendingTaskEquipmentIds(new Set());
+    }
+  }, [isEditMode]);
+
   useEffect(() => {
-    const fetchPendingTaskEquipment = async (): Promise<void> => {
-      try {
-        const response = await api.get('/placement-tasks/', { params: { status: 'PENDING' } });
-        const rows = extractApiList<MerchTaskRow>(response.data);
-        setPendingTaskEquipmentIds(new Set(rows.map((row) => row.equipment.id)));
-      } catch {
-        setPendingTaskEquipmentIds(new Set());
-      }
-    };
-    void fetchPendingTaskEquipment();
-  }, [zones]);
+    void loadPendingTaskEquipmentIds();
+  }, [loadPendingTaskEquipmentIds, zones]);
 
   const mapWidthPx = dimensions.width * 100 * PX_PER_CM;
   const mapHeightPx = dimensions.height * 100 * PX_PER_CM;
@@ -608,6 +613,9 @@ function StoreMap() {
       await api.patch(`/floor-equipment/${draggingItem}/`, {
         pos_x: dragged.pos_x,
         pos_y: dragged.pos_y,
+        rotation: snapRotationDeg(
+          typeof dragged.rotation === 'number' ? dragged.rotation : Number(dragged.rotation) || 0,
+        ),
       });
     } catch (error) {
       console.error('Ошибка сохранения позиции оборудования:', error);
@@ -685,13 +693,12 @@ function StoreMap() {
       } else if (selectedEquipmentId) {
         const response = await api.patch(`/floor-equipment/${selectedEquipmentId}/`, payload);
         if (response.status === 200) {
+          const merged = normalizeFloorEquipment(response.data as Record<string, unknown>);
           setZones((prevZones) =>
             prevZones.map((zone) => ({
               ...zone,
               equipment: zone.equipment.map((eq) =>
-                eq.id === selectedEquipmentId
-                  ? { ...eq, ...payload, zone: eq.zone }
-                  : eq,
+                eq.id === selectedEquipmentId ? { ...eq, ...merged, zone: eq.zone } : eq,
               ),
             })),
           );
@@ -732,9 +739,20 @@ function StoreMap() {
         return;
       }
       try {
-        await api.patch(`/floor-equipment/${id}/`, {
+        const res = await api.patch(`/floor-equipment/${id}/`, {
           rotation: nextRotation,
         });
+        if (res.status === 200 && res.data && typeof res.data === 'object') {
+          const merged = normalizeFloorEquipment(res.data as Record<string, unknown>);
+          setZones((prevZones) =>
+            prevZones.map((zone) => ({
+              ...zone,
+              equipment: zone.equipment.map((eq) =>
+                eq.id === id ? { ...eq, ...merged, zone: eq.zone } : eq,
+              ),
+            })),
+          );
+        }
       } catch (error) {
         console.error('Ошибка сохранения поворота:', error);
         alert('Не удалось сохранить поворот на сервере.');
@@ -1660,6 +1678,7 @@ function StoreMap() {
                   setMerchEquipmentId(null);
                   setSelectedSlotId(null);
                   setMerchFeedback(null);
+                  void loadPendingTaskEquipmentIds();
                 }}
                 className="rounded-md border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-slate-300 hover:border-slate-500"
               >

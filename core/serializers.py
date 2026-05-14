@@ -13,13 +13,14 @@ from .models import (
     ProductBatch,
     Shelf,
     StockItem,
+    Store,
     Supplier,
     SupplyOrder,
     SupplyOrderItem,
     User,
     Zone,
 )
-from .placement_sync import reconcile_for_product
+from .placement_sync import release_placement_task_reservation
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -53,17 +54,24 @@ class EquipmentSlotSerializer(serializers.ModelSerializer):
             return None
         row = StockItem.objects.filter(product_id=planogram.product_id).first()
         stock_qty = int(row.quantity) if row else 0
-        pending_sum = (
-            planogram.placement_tasks.filter(status=PlacementTask.Status.PENDING).aggregate(
-                total=Sum("quantity")
-            )["total"]
-        )
+        completed_sum = planogram.placement_tasks.filter(
+            status=PlacementTask.Status.COMPLETED,
+        ).aggregate(total=Sum("quantity"))["total"]
+        completed_qty = int(completed_sum or 0)
+        pending_sum = planogram.placement_tasks.filter(
+            status__in=(
+                PlacementTask.Status.PENDING,
+                PlacementTask.Status.IN_PROGRESS,
+            ),
+        ).aggregate(total=Sum("quantity"))["total"]
         pending_qty = int(pending_sum or 0)
+        target = int(planogram.target_quantity)
+        gap = max(0, target - completed_qty - pending_qty)
         status = "OK"
         if pending_qty > 0:
             status = "IN_PROGRESS"
-        elif stock_qty <= 0:
-            status = "DEFICIT"
+        elif gap > 0:
+            status = "DEFICIT" if stock_qty < gap else "IN_PROGRESS"
         return {
             "id": planogram.pk,
             "product": ProductBriefSerializer(planogram.product).data,
@@ -155,6 +163,81 @@ class PlacementTaskAdminUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Недопустимый статус задачи.")
         return value
 
+    def validate(self, attrs):
+        if self.instance and self.instance.status == PlacementTask.Status.COMPLETED:
+            raise serializers.ValidationError("Выполненную задачу нельзя изменять.")
+        if self.instance and self.instance.status == PlacementTask.Status.CANCELLED:
+            raise serializers.ValidationError("Отменённую задачу нельзя изменять.")
+        return attrs
+
+    def update(self, instance, validated_data):
+        from .placement_sync import reconcile_planogram
+
+        new_status = validated_data.get("status", instance.status)
+        new_equipment = validated_data.get("equipment")
+
+        if new_status == PlacementTask.Status.CANCELLED:
+            validated_data.pop("equipment", None)
+            new_equipment = None
+
+        with transaction.atomic():
+            task = (
+                PlacementTask.objects.select_for_update()
+                .select_related("planogram", "planogram__slot")
+                .get(pk=instance.pk)
+            )
+            if new_status == PlacementTask.Status.CANCELLED and task.status in (
+                PlacementTask.Status.PENDING,
+                PlacementTask.Status.IN_PROGRESS,
+            ):
+                release_placement_task_reservation(task.product_id, int(task.quantity))
+
+            if (
+                new_equipment is not None
+                and new_equipment.pk != task.equipment_id
+                and task.planogram_id
+            ):
+                old_slot = task.planogram.slot
+                new_slot = (
+                    EquipmentSlot.objects.select_for_update()
+                    .filter(
+                        equipment_id=new_equipment.pk,
+                        row_index=old_slot.row_index,
+                        col_index=old_slot.col_index,
+                    )
+                    .first()
+                )
+                if new_slot is None:
+                    new_slot = (
+                        EquipmentSlot.objects.select_for_update()
+                        .filter(equipment_id=new_equipment.pk)
+                        .order_by("row_index", "col_index")
+                        .first()
+                    )
+                if new_slot is None:
+                    raise serializers.ValidationError(
+                        {"equipment": "У выбранного оборудования нет слотов."}
+                    )
+                blocking = (
+                    Planogram.objects.select_for_update()
+                    .filter(slot=new_slot)
+                    .exclude(pk=task.planogram_id)
+                    .exists()
+                )
+                if blocking:
+                    raise serializers.ValidationError(
+                        {
+                            "equipment": "Целевой слот уже занят другой позицией планограммы.",
+                        }
+                    )
+                Planogram.objects.filter(pk=task.planogram_id).update(slot=new_slot)
+
+            instance = super().update(instance, validated_data)
+
+        if instance.planogram_id and instance.status == PlacementTask.Status.COMPLETED:
+            reconcile_planogram(instance.planogram)
+        return instance
+
 
 class PlanogramReadSerializer(serializers.ModelSerializer):
     product = ProductBriefSerializer(read_only=True)
@@ -213,6 +296,18 @@ class ProductBatchSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductBatch
         fields = "__all__"
+        extra_kwargs = {
+            # Заполняются из quantity / expiry_date в validate() при приёмке
+            "initial_quantity": {"required": False},
+            "current_quantity": {"required": False},
+            "expiration_date": {"required": False},
+            "purchase_price": {"required": False},
+            "store": {"required": False},
+            "supply_item": {"required": False},
+            "serial_number": {"required": False},
+            "is_active": {"required": False},
+            "created_at": {"read_only": True},
+        }
 
     def get_remaining_days(self, obj: ProductBatch) -> int:
         return obj.get_remaining_days()
@@ -228,12 +323,14 @@ class ProductBatchSerializer(serializers.ModelSerializer):
             attrs["current_quantity"] = quantity
         if expiry_date is not None:
             attrs["expiration_date"] = expiry_date
-        if attrs.get("initial_quantity") is None or attrs.get("current_quantity") is None:
-            raise serializers.ValidationError("Укажите quantity (количество партии).")
-        if attrs.get("expiration_date") is None:
-            raise serializers.ValidationError("Укажите expiry_date (срок годности).")
-        if attrs.get("purchase_price") is None:
-            attrs["purchase_price"] = 0
+
+        if self.instance is None:
+            if attrs.get("initial_quantity") is None or attrs.get("current_quantity") is None:
+                raise serializers.ValidationError("Укажите quantity (количество партии).")
+            if attrs.get("expiration_date") is None:
+                raise serializers.ValidationError("Укажите expiry_date (срок годности).")
+            if attrs.get("purchase_price") is None:
+                attrs["purchase_price"] = 0
         return attrs
 
     def create(self, validated_data):
@@ -244,14 +341,18 @@ class ProductBatchSerializer(serializers.ModelSerializer):
             user = getattr(request, "user", None)
             user_store = getattr(user, "store", None) if user is not None else None
             if user_store is None:
+                user_store = Store.objects.order_by("pk").first()
+            if user_store is None:
                 raise serializers.ValidationError(
-                    {"store": "Не удалось определить магазин. Передайте store в запросе."}
+                    {
+                        "store": "Нет магазина в системе. Создайте магазин или передайте store в запросе."
+                    }
                 )
             validated_data["store"] = user_store
 
         with transaction.atomic():
             batch = ProductBatch.objects.create(**validated_data)
-            reconcile_for_product(batch.product_id)
+            # reconcile_for_product вызывается из сигнала stock_item_saved при обновлении склада
         return batch
 
 

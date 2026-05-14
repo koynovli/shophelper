@@ -182,6 +182,13 @@ export function MapEquipmentItem({
 
       <TypeDecoration type={displayType} />
 
+      {hasPendingTask && layoutLocked ? (
+        <span
+          className="pointer-events-none absolute inset-0 z-[5] rounded-lg border-2 border-amber-400/90 shadow-[0_0_14px_rgba(251,191,36,0.45)] animate-pulse"
+          aria-hidden
+        />
+      ) : null}
+
       {shelfLines > 0 ? (
         <div className="pointer-events-none absolute inset-1">
           {Array.from({ length: shelfLines }).map((_, idx) => (
@@ -206,8 +213,11 @@ export function MapEquipmentItem({
       <span className="pointer-events-none absolute right-1 top-1 z-10 rounded bg-black/50 px-1 py-0.5 text-[9px] font-semibold text-slate-100">
         {Math.round(equipment.rotation ?? 0)}°
       </span>
-      {hasPendingTask ? (
-        <span className="pointer-events-none absolute right-1 bottom-1 z-10 inline-flex h-5 w-5 animate-pulse items-center justify-center rounded-full border border-amber-300/80 bg-amber-500/80 text-[11px] font-bold text-slate-950">
+      {hasPendingTask && layoutLocked ? (
+        <span
+          className="pointer-events-none absolute right-1 bottom-1 z-10 inline-flex h-5 w-5 animate-pulse items-center justify-center rounded-full border border-amber-300/80 bg-amber-500/80 text-[11px] font-bold text-slate-950 shadow-[0_0_12px_rgba(245,158,11,0.55)]"
+          aria-hidden
+        >
           !
         </span>
       ) : null}
