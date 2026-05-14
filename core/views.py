@@ -34,6 +34,7 @@ from .permissions import IsRoleAdmin
 from .serializers import (
     EquipmentSerializer,
     InventorySerializer,
+    PlacementTaskAdminUpdateSerializer,
     PlanogramReadSerializer,
     PlanogramWriteSerializer,
     PlacementTaskReadSerializer,
@@ -122,7 +123,7 @@ class ProductBatchFilter(filters.FilterSet):
         fields = ("store", "product", "is_active")
 
 
-class ProductBatchViewSet(viewsets.ReadOnlyModelViewSet):
+class ProductBatchViewSet(viewsets.ModelViewSet):
     queryset = ProductBatch.objects.select_related(
         "product",
         "store",
@@ -131,6 +132,11 @@ class ProductBatchViewSet(viewsets.ReadOnlyModelViewSet):
     ).all()
     serializer_class = ProductBatchSerializer
     filterset_class = ProductBatchFilter
+
+    def get_permissions(self):
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRoleAdmin()]
 
     @action(detail=False, methods=["get"], url_path="get-fefo")
     def get_fefo(self, request):
@@ -468,6 +474,8 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action in ("partial_update", "update"):
+            if getattr(self.request.user, "role", None) == User.Role.ADMIN:
+                return PlacementTaskAdminUpdateSerializer
             return PlacementTaskUpdateSerializer
         return PlacementTaskReadSerializer
 

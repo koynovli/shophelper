@@ -716,7 +716,9 @@ class PlacementTask(models.Model):
 
     class Status(models.TextChoices):
         PENDING = "PENDING", "Ожидает"
-        COMPLETED = "COMPLETED", "Выполнена"
+        IN_PROGRESS = "IN_PROGRESS", "Выполняется"
+        COMPLETED = "COMPLETED", "Завершено"
+        CANCELLED = "CANCELLED", "Отменена"
 
     planogram = models.ForeignKey(
         Planogram,

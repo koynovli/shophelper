@@ -13,6 +13,7 @@ type Props = {
   selected: boolean;
   dragging: boolean;
   collision: boolean;
+  hasPendingTask: boolean;
   onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onDoubleClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
@@ -92,6 +93,7 @@ export function MapEquipmentItem({
   selected,
   dragging,
   collision,
+  hasPendingTask,
   onPointerDown,
   onClick,
   onDoubleClick,
@@ -204,6 +206,11 @@ export function MapEquipmentItem({
       <span className="pointer-events-none absolute right-1 top-1 z-10 rounded bg-black/50 px-1 py-0.5 text-[9px] font-semibold text-slate-100">
         {Math.round(equipment.rotation ?? 0)}°
       </span>
+      {hasPendingTask ? (
+        <span className="pointer-events-none absolute right-1 bottom-1 z-10 inline-flex h-5 w-5 animate-pulse items-center justify-center rounded-full border border-amber-300/80 bg-amber-500/80 text-[11px] font-bold text-slate-950">
+          !
+        </span>
+      ) : null}
 
       <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-1 hidden max-w-[min(280px,calc(100vw-4rem))] -translate-x-1/2 whitespace-normal rounded-md border border-slate-600/90 bg-slate-950/95 px-2 py-1 text-left text-[10px] leading-snug text-slate-100 shadow-2xl backdrop-blur-sm group-hover:block sm:whitespace-nowrap">
         {equipment.name}

@@ -28,7 +28,6 @@ import api from '../api';
 import type { AxiosError } from 'axios';
 import { useMapEditMode } from '../map/MapEditModeContext';
 import type {
-  EquipmentSlot,
   FloorEquipment,
   FloorEquipmentType,
   FloorZone,
@@ -204,6 +203,7 @@ function StoreMap() {
     text: string;
   } | null>(null);
   const [minScale, setMinScale] = useState(0.05);
+  const [pendingTaskEquipmentIds, setPendingTaskEquipmentIds] = useState<Set<number>>(new Set());
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const mapBoardRef = useRef<HTMLDivElement>(null);
@@ -257,6 +257,19 @@ function StoreMap() {
 
     fetchZones();
   }, []);
+
+  useEffect(() => {
+    const fetchPendingTaskEquipment = async (): Promise<void> => {
+      try {
+        const response = await api.get('/placement-tasks/', { params: { status: 'PENDING' } });
+        const rows = extractApiList<MerchTaskRow>(response.data);
+        setPendingTaskEquipmentIds(new Set(rows.map((row) => row.equipment.id)));
+      } catch {
+        setPendingTaskEquipmentIds(new Set());
+      }
+    };
+    void fetchPendingTaskEquipment();
+  }, [zones]);
 
   const mapWidthPx = dimensions.width * 100 * PX_PER_CM;
   const mapHeightPx = dimensions.height * 100 * PX_PER_CM;
@@ -1231,6 +1244,7 @@ function StoreMap() {
                       selected={selectedEquipmentId === eq.id}
                       dragging={draggingItem === eq.id}
                       collision={collisionIds.has(eq.id)}
+                      hasPendingTask={pendingTaskEquipmentIds.has(eq.id)}
                       onPointerDown={(ev) => {
                         if (!isEditMode || !isSelectMode) {
                           return;

@@ -1,7 +1,7 @@
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from .models import Equipment, EquipmentSlot, Inventory, Planogram, StockItem
+from .models import Equipment, EquipmentSlot, Inventory, Planogram, ProductBatch, StockItem
 from .placement_sync import reconcile_for_product, reconcile_planogram
 
 
@@ -30,6 +30,15 @@ def inventory_saved(sender, instance: Inventory, **kwargs):
 @receiver(post_delete, sender=Inventory)
 def inventory_deleted(sender, instance: Inventory, **kwargs):
     reconcile_for_product(instance.product_id)
+
+
+@receiver(post_save, sender=ProductBatch)
+def product_batch_created(sender, instance: ProductBatch, created: bool, **kwargs):
+    if not created:
+        return
+    stock, _ = StockItem.objects.get_or_create(product=instance.product, defaults={"quantity": 0})
+    stock.quantity = int(stock.quantity) + int(instance.current_quantity)
+    stock.save(update_fields=["quantity"])
 
 
 def _generate_default_slots_for_equipment(equipment: Equipment) -> None:

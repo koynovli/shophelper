@@ -1,6 +1,7 @@
+from django.db import transaction
+from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.db.models import Sum
 
 from .models import (
     Equipment,
@@ -18,6 +19,7 @@ from .models import (
     User,
     Zone,
 )
+from .placement_sync import reconcile_for_product
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -137,6 +139,23 @@ class PlacementTaskUpdateSerializer(serializers.ModelSerializer):
         return instance
 
 
+class PlacementTaskAdminUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlacementTask
+        fields = ("status", "equipment")
+
+    def validate_status(self, value: str) -> str:
+        allowed = {
+            PlacementTask.Status.PENDING,
+            PlacementTask.Status.IN_PROGRESS,
+            PlacementTask.Status.COMPLETED,
+            PlacementTask.Status.CANCELLED,
+        }
+        if value not in allowed:
+            raise serializers.ValidationError("Недопустимый статус задачи.")
+        return value
+
+
 class PlanogramReadSerializer(serializers.ModelSerializer):
     product = ProductBriefSerializer(read_only=True)
     slot = serializers.SerializerMethodField()
@@ -188,6 +207,8 @@ class SupplierSerializer(serializers.ModelSerializer):
 class ProductBatchSerializer(serializers.ModelSerializer):
     remaining_days = serializers.SerializerMethodField()
     is_expired = serializers.SerializerMethodField()
+    quantity = serializers.IntegerField(write_only=True, required=False, min_value=1)
+    expiry_date = serializers.DateField(write_only=True, required=False)
 
     class Meta:
         model = ProductBatch
@@ -198,6 +219,40 @@ class ProductBatchSerializer(serializers.ModelSerializer):
 
     def get_is_expired(self, obj: ProductBatch) -> bool:
         return obj.is_expired
+
+    def validate(self, attrs):
+        quantity = attrs.get("quantity")
+        expiry_date = attrs.get("expiry_date")
+        if quantity is not None:
+            attrs["initial_quantity"] = quantity
+            attrs["current_quantity"] = quantity
+        if expiry_date is not None:
+            attrs["expiration_date"] = expiry_date
+        if attrs.get("initial_quantity") is None or attrs.get("current_quantity") is None:
+            raise serializers.ValidationError("Укажите quantity (количество партии).")
+        if attrs.get("expiration_date") is None:
+            raise serializers.ValidationError("Укажите expiry_date (срок годности).")
+        if attrs.get("purchase_price") is None:
+            attrs["purchase_price"] = 0
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop("quantity", None)
+        validated_data.pop("expiry_date", None)
+        request = self.context.get("request")
+        if validated_data.get("store") is None:
+            user = getattr(request, "user", None)
+            user_store = getattr(user, "store", None) if user is not None else None
+            if user_store is None:
+                raise serializers.ValidationError(
+                    {"store": "Не удалось определить магазин. Передайте store в запросе."}
+                )
+            validated_data["store"] = user_store
+
+        with transaction.atomic():
+            batch = ProductBatch.objects.create(**validated_data)
+            reconcile_for_product(batch.product_id)
+        return batch
 
 
 class SupplyOrderItemSerializer(serializers.ModelSerializer):

@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, Factory, LogOut, Map, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
+import { CalendarDays, ClipboardList, Factory, Inbox, LogOut, Map, ReceiptText, ShoppingCart, Tag } from 'lucide-react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 
 import api from './api';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { useAuth } from './auth/AuthContext';
 import StoreMap from './components/StoreMap';
+import { ReceivingPanel } from './components/ReceivingPanel';
+import { TaskControlCenter } from './components/TaskControlCenter';
 import { MapEditModeProvider } from './map/MapEditModeContext';
 import { MapModeToolbar } from './components/MapModeToolbar';
 import { EmployeeDashboard } from './pages/EmployeeDashboard';
@@ -49,7 +51,7 @@ function App() {
   };
   const [orders, setOrders] = useState<SupplyOrder[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'orders' | 'map'>('orders');
+  const [activeTab, setActiveTab] = useState<'orders' | 'map' | 'receiving' | 'tasks'>('orders');
 
   useEffect(() => {
     const fetchOrders = async (): Promise<void> => {
@@ -158,6 +160,30 @@ function App() {
             <Map className="h-4 w-4" />
             Карта зала
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('receiving')}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'receiving'
+                ? 'bg-emerald-500/20 text-emerald-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <Inbox className="h-4 w-4" />
+            Приемка
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('tasks')}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'tasks'
+                ? 'bg-amber-500/20 text-amber-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <ClipboardList className="h-4 w-4" />
+            Центр задач
+          </button>
         </div>
 
         {activeTab === 'orders' ? (
@@ -218,11 +244,15 @@ function App() {
               </div>
             )}
           </>
-        ) : (
+        ) : activeTab === 'map' ? (
           <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-4 shadow-2xl">
             <MapModeToolbar className="mb-4" />
             <StoreMap />
           </div>
+        ) : activeTab === 'receiving' ? (
+          <ReceivingPanel />
+        ) : (
+          <TaskControlCenter />
         )}
       </main>
     </div>
