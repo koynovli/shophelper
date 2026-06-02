@@ -181,6 +181,15 @@ function App() {
               {user.username}
             </span>
           ) : null}
+          <a
+            href="/employee"
+            target="_blank"
+            rel="noreferrer"
+            className="hidden rounded-full border border-sky-600/60 bg-sky-950/40 px-3 py-1.5 text-sm text-sky-100 hover:bg-sky-900/50 sm:inline-flex"
+            title="Откроется только для пользователя с ролью employee"
+          >
+            PWA сотрудника
+          </a>
           <button
             type="button"
             onClick={handleLogout}

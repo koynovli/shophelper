@@ -1,49 +1,31 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle2, Loader2, LogOut, Package, User } from 'lucide-react';
+import { Loader2, LogOut, Package, User } from 'lucide-react';
 import type { AxiosError } from 'axios';
 
 import api from '../api';
+import type { TaskPoolItem } from '../api/taskPool';
+import { poolStatusLabel, taskTypeLabel } from '../api/taskPool';
 import { useAuth } from '../auth/AuthContext';
-
-type PlacementTaskRow = {
-  id: number;
-  product: { id: number; name: string; sku: string };
-  equipment: { id: number; name: string };
-  slot_info: { id: number; row_index: number; col_index: number } | null;
-  destination_text: string;
-  quantity: number;
-  status: string;
-  created_at: string;
-};
-
-function extractList<T>(data: unknown): T[] {
-  if (Array.isArray(data)) {
-    return data as T[];
-  }
-  if (data && typeof data === 'object' && 'results' in data) {
-    const r = (data as { results?: T[] }).results;
-    return Array.isArray(r) ? r : [];
-  }
-  return [];
-}
+import { PlacementTaskWizard } from '../components/PlacementTaskWizard';
+import { StaffTaskWizard } from '../components/StaffTaskWizard';
+import { useStoreNotifications } from '../hooks/useStoreNotifications';
+import { useTaskPoolWebSocket } from '../hooks/useTaskPoolWebSocket';
 
 export function EmployeeDashboard(): React.ReactElement {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<PlacementTaskRow[]>([]);
+  const [tasks, setTasks] = useState<TaskPoolItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [completingId, setCompletingId] = useState<number | null>(null);
-  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const loadPending = useCallback(async (): Promise<void> => {
     setError(null);
     try {
-      const r = await api.get<unknown>('/placement-tasks/', {
-        params: { status: 'PENDING' },
-      });
-      const list = extractList<PlacementTaskRow>(r.data);
+      const r = await api.get<TaskPoolItem[]>('/task-pool/');
+      const list = Array.isArray(r.data) ? r.data : [];
       setTasks(list);
       setSelectedTaskId((prev) => prev ?? list[0]?.id ?? null);
     } catch (err) {
@@ -60,25 +42,25 @@ export function EmployeeDashboard(): React.ReactElement {
     void loadPending();
   }, [loadPending]);
 
+  useTaskPoolWebSocket(() => {
+    void loadPending();
+  });
+
+  useStoreNotifications((ev) => {
+    if (ev.event === 'placement_task.created') {
+      const msg =
+        typeof ev.data.message === 'string'
+          ? ev.data.message
+          : 'Новая задача на выкладку';
+      setToast(msg);
+      window.setTimeout(() => setToast(null), 6000);
+      void loadPending();
+    }
+  });
+
   const handleLogout = (): void => {
     logout();
     navigate('/login', { replace: true });
-  };
-
-  const handleComplete = async (id: number): Promise<void> => {
-    setCompletingId(id);
-    setError(null);
-    try {
-      await api.patch(`/placement-tasks/${id}/`, { status: 'COMPLETED' });
-      setTasks((prev) => prev.filter((t) => t.id !== id));
-      setSelectedTaskId((prev) => (prev === id ? null : prev));
-    } catch (err) {
-      const ax = err as AxiosError<{ detail?: string }>;
-      const detail = ax.response?.data?.detail;
-      setError(typeof detail === 'string' ? detail : 'Не удалось отметить задачу выполненной.');
-    } finally {
-      setCompletingId(null);
-    }
   };
 
   return (
@@ -102,12 +84,20 @@ export function EmployeeDashboard(): React.ReactElement {
       </header>
 
       <main className="mx-auto w-full max-w-xl">
+        {toast ? (
+          <div
+            role="status"
+            className="mb-3 rounded-xl border border-sky-500/40 bg-sky-950/50 px-4 py-3 text-sm text-sky-100"
+          >
+            {toast}
+          </div>
+        ) : null}
         <div className="mb-4 flex items-center gap-2 sm:mb-5">
           <Package className="h-6 w-6 text-emerald-400" aria-hidden />
           <div>
-            <h1 className="text-lg font-semibold leading-tight sm:text-xl">Задачи на выкладку</h1>
+            <h1 className="text-lg font-semibold leading-tight sm:text-xl">Мои задачи</h1>
             <p className="text-xs text-slate-400 sm:text-sm">
-              Сформированы автоматически по планограмме и остатку на складе
+              Выкладка и поручения менеджера в одном списке
             </p>
           </div>
         </div>
@@ -128,37 +118,12 @@ export function EmployeeDashboard(): React.ReactElement {
           </div>
         ) : tasks.length === 0 ? (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-12 text-center text-sm text-slate-400">
-            Нет задач в статусе «Ожидает». Появятся, когда планограмма и склад дадут нехватку на полке.
+            Нет активных задач.
           </div>
         ) : (
-          <>
-            <div className="mb-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
-              <p className="text-xs uppercase tracking-wide text-slate-500">Мини-карта направления</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {Array.from(new Set(tasks.map((t) => t.equipment.id))).map((eqId) => {
-                  const eqName = tasks.find((t) => t.equipment.id === eqId)?.equipment.name ?? `Оборудование ${eqId}`;
-                  const active = tasks.find((t) => t.id === selectedTaskId)?.equipment.id === eqId;
-                  return (
-                    <div
-                      key={eqId}
-                      className={`rounded-md border px-3 py-1 text-xs ${
-                        active
-                          ? 'border-emerald-400 bg-emerald-900/30 text-emerald-100'
-                          : 'border-slate-700 bg-slate-900 text-slate-400'
-                      }`}
-                    >
-                      {eqName}
-                    </div>
-                  );
-                })}
-              </div>
-              <p className="mt-2 text-[11px] text-slate-500">
-                Нажмите на карточку задачи, чтобы подсветить целевое оборудование.
-              </p>
-            </div>
-            <ul className="flex flex-col gap-3 sm:gap-4">
+          <ul className="flex flex-col gap-3 sm:gap-4">
             {tasks.map((t) => (
-              <li key={t.id}>
+              <li key={`${t.task_type}-${t.id}`}>
                 <article
                   onClick={() => setSelectedTaskId(t.id)}
                   className={`cursor-pointer rounded-2xl border bg-slate-900/70 p-4 shadow-lg transition sm:p-5 ${
@@ -167,36 +132,36 @@ export function EmployeeDashboard(): React.ReactElement {
                       : 'border-slate-800 hover:border-slate-700'
                   }`}
                 >
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span
+                      className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                        t.task_type === 'placement'
+                          ? 'bg-emerald-900/50 text-emerald-200'
+                          : 'bg-violet-900/50 text-violet-200'
+                      }`}
+                    >
+                      {taskTypeLabel(t.task_type)}
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      {poolStatusLabel(t.status, t.task_type)}
+                    </span>
+                  </div>
                   <h2 className="text-base font-semibold leading-snug text-slate-50 sm:text-lg">
-                    Возьмите со склада: {t.product.name} — {t.quantity} шт.
+                    {t.title}
                   </h2>
-                  <p className="mt-2 text-sm text-slate-300 sm:text-base">
-                    Разместите в <span className="font-medium text-emerald-200/95">{t.destination_text}</span>.
-                  </p>
-                  <p className="mt-1 text-xs text-slate-500">SKU: {t.product.sku}</p>
-                  <button
-                    type="button"
-                    disabled={completingId === t.id}
-                    onClick={() => void handleComplete(t.id)}
-                    className="mt-4 flex w-full min-h-[48px] items-center justify-center gap-2 rounded-xl border border-emerald-500/60 bg-emerald-600/90 px-4 py-3 text-base font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[52px] sm:text-lg"
-                  >
-                    {completingId === t.id ? (
-                      <>
-                        <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
-                        Сохранение…
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="h-5 w-5 shrink-0" aria-hidden />
-                        Выполнено
-                      </>
-                    )}
-                  </button>
+                  {t.destination ? (
+                    <p className="mt-2 text-sm text-slate-300">{t.destination}</p>
+                  ) : null}
+                  {selectedTaskId === t.id && t.task_type === 'placement' ? (
+                    <PlacementTaskWizard task={t} onDone={() => void loadPending()} />
+                  ) : null}
+                  {selectedTaskId === t.id && t.task_type === 'staff' ? (
+                    <StaffTaskWizard task={t} onDone={() => void loadPending()} />
+                  ) : null}
                 </article>
               </li>
             ))}
-            </ul>
-          </>
+          </ul>
         )}
       </main>
     </div>

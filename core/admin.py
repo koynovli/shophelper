@@ -4,10 +4,12 @@ from django.utils.html import format_html
 
 from .models import (
     Category,
+    ChatMessage,
     Company,
     Equipment,
     EquipmentSlot,
     Inventory,
+    LegacyPlanogramTask,
     Placement,
     PlacementTask,
     Planogram,
@@ -16,12 +18,12 @@ from .models import (
     ProductBatch,
     Shelf,
     ShelfLevel,
+    StaffTask,
     StockItem,
     Store,
     Supplier,
     SupplyOrder,
     SupplyOrderItem,
-    Task,
     User,
     Zone,
 )
@@ -206,10 +208,53 @@ class ShelfInline(admin.TabularInline):
 
 @admin.register(PlacementTask)
 class PlacementTaskAdmin(admin.ModelAdmin):
-    list_display = ("id", "planogram", "product", "equipment", "quantity", "status", "created_at")
+    list_display = (
+        "id",
+        "planogram",
+        "product",
+        "equipment",
+        "quantity",
+        "status",
+        "assigned_to",
+        "batch",
+        "created_at",
+    )
     list_filter = ("status", "equipment__zone__store")
     search_fields = ("product__name", "product__sku", "equipment__name")
-    autocomplete_fields = ("planogram", "product", "equipment")
+    autocomplete_fields = ("planogram", "product", "equipment", "assigned_to", "batch")
+
+
+@admin.register(StaffTask)
+class StaffTaskAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "status",
+        "created_by",
+        "assigned_to",
+        "zone",
+        "requires_photo",
+        "created_at",
+    )
+    list_filter = ("status", "zone__store", "requires_photo")
+    search_fields = ("title", "description")
+    autocomplete_fields = ("created_by", "assigned_to", "zone", "equipment", "slot")
+
+
+class ChatMessageInline(admin.TabularInline):
+    model = ChatMessage
+    extra = 0
+    readonly_fields = ("created_at",)
+    autocomplete_fields = ("sender",)
+
+
+StaffTaskAdmin.inlines = (ChatMessageInline,)
+
+
+@admin.register(ChatMessage)
+class ChatMessageAdmin(admin.ModelAdmin):
+    list_display = ("staff_task", "sender", "text", "created_at")
+    search_fields = ("text", "staff_task__title")
+    autocomplete_fields = ("staff_task", "sender")
 
 
 @admin.register(Planogram)
@@ -222,10 +267,11 @@ class PlanogramAdmin(admin.ModelAdmin):
 
 @admin.register(EquipmentSlot)
 class EquipmentSlotAdmin(admin.ModelAdmin):
-    list_display = ("id", "equipment", "row_index", "col_index", "width_percent")
+    list_display = ("id", "equipment", "row_index", "col_index", "width_percent", "qr_token")
     list_filter = ("equipment__zone__store", "equipment__type")
-    search_fields = ("equipment__name",)
+    search_fields = ("equipment__name", "qr_token")
     autocomplete_fields = ("equipment",)
+    readonly_fields = ("qr_token",)
 
 
 @admin.register(StockItem)
@@ -277,8 +323,8 @@ class PlacementAdmin(admin.ModelAdmin):
         return obj.calculate_capacity()
 
 
-@admin.register(Task)
-class TaskAdmin(admin.ModelAdmin):
+@admin.register(LegacyPlanogramTask)
+class LegacyPlanogramTaskAdmin(admin.ModelAdmin):
     list_display = ("title", "status", "assigned_to", "created_at", "completed_at")
     list_filter = ("status",)
     search_fields = ("title", "assigned_to__username", "assigned_to__email")

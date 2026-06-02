@@ -7,9 +7,20 @@ import axios, {
 /** Без завершающего слэша — чтобы не получать `/api//token/` при сборке URL */
 const API_ROOT = 'http://127.0.0.1:8000/api';
 const API_BASE_URL = `${API_ROOT}/`;
+export const MEDIA_HOST = API_ROOT.replace(/\/api$/, '');
 
 const ACCESS_TOKEN_KEY = 'shophelper.accessToken';
 const REFRESH_TOKEN_KEY = 'shophelper.refreshToken';
+
+export function resolveMediaUrl(url: string | null | undefined): string | null {
+  if (!url) {
+    return null;
+  }
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  return `${MEDIA_HOST}${url.startsWith('/') ? url : `/${url}`}`;
+}
 
 export function getAccessToken(): string | null {
   return localStorage.getItem(ACCESS_TOKEN_KEY);

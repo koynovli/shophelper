@@ -4,6 +4,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
+    ChatMessage,
     Equipment,
     EquipmentSlot,
     Inventory,
@@ -12,6 +13,7 @@ from .models import (
     Product,
     ProductBatch,
     Shelf,
+    StaffTask,
     StockItem,
     Store,
     Supplier,
@@ -46,7 +48,15 @@ class EquipmentSlotSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EquipmentSlot
-        fields = ("id", "row_index", "col_index", "width_percent", "planogram")
+        fields = (
+            "id",
+            "row_index",
+            "col_index",
+            "width_percent",
+            "current_qty",
+            "max_capacity",
+            "planogram",
+        )
 
     def get_planogram(self, obj: EquipmentSlot):
         planogram = obj.planograms.select_related("product").first()
@@ -60,33 +70,48 @@ class EquipmentSlotSerializer(serializers.ModelSerializer):
         completed_qty = int(completed_sum or 0)
         pending_sum = planogram.placement_tasks.filter(
             status__in=(
+                PlacementTask.Status.CREATED,
                 PlacementTask.Status.PENDING,
                 PlacementTask.Status.IN_PROGRESS,
             ),
         ).aggregate(total=Sum("quantity"))["total"]
         pending_qty = int(pending_sum or 0)
+        cap = int(obj.max_capacity or 0)
+        current = int(obj.current_qty or 0)
         target = int(planogram.target_quantity)
-        gap = max(0, target - completed_qty - pending_qty)
+        gap = max(0, cap - current - pending_qty) if cap > 0 else max(0, target - completed_qty - pending_qty)
         status = "OK"
         if pending_qty > 0:
             status = "IN_PROGRESS"
+        elif cap > 0 and current < cap * 0.3:
+            status = "DEFICIT" if stock_qty < gap else "IN_PROGRESS"
         elif gap > 0:
             status = "DEFICIT" if stock_qty < gap else "IN_PROGRESS"
         return {
             "id": planogram.pk,
             "product": ProductBriefSerializer(planogram.product).data,
             "target_quantity": planogram.target_quantity,
+            "current_qty": current,
+            "max_capacity": cap,
             "stock_quantity": stock_qty,
             "pending_quantity": pending_qty,
             "replenishment_status": status,
         }
 
 
+class UserBriefSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ("id", "username")
+
+
 class PlacementTaskReadSerializer(serializers.ModelSerializer):
     product = ProductBriefSerializer(read_only=True)
     equipment = EquipmentBriefSerializer(read_only=True)
+    assigned_to = UserBriefSerializer(read_only=True)
     slot_info = serializers.SerializerMethodField()
     destination_text = serializers.SerializerMethodField()
+    slot_qr_token = serializers.SerializerMethodField()
 
     class Meta:
         model = PlacementTask
@@ -99,8 +124,19 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
             "destination_text",
             "quantity",
             "status",
+            "assigned_to",
+            "batch",
+            "photo_url",
+            "slot_verified_at",
+            "completed_at",
+            "slot_qr_token",
             "created_at",
         )
+
+    def get_slot_qr_token(self, obj: PlacementTask):
+        if obj.planogram_id and obj.planogram.slot_id:
+            return str(obj.planogram.slot.qr_token)
+        return None
 
     def get_slot_info(self, obj: PlacementTask):
         if obj.planogram_id is None or obj.planogram.slot_id is None:
@@ -127,11 +163,9 @@ class PlacementTaskUpdateSerializer(serializers.ModelSerializer):
         fields = ("status",)
 
     def validate_status(self, value: str) -> str:
-        if value != PlacementTask.Status.COMPLETED:
-            raise serializers.ValidationError(
-                "Допустимо только завершение задачи: статус COMPLETED."
-            )
-        return value
+        raise serializers.ValidationError(
+            "Используйте POST /placement-tasks/{id}/complete/ для завершения задачи."
+        )
 
     def validate(self, attrs):
         if self.instance and self.instance.status == PlacementTask.Status.COMPLETED:
@@ -154,9 +188,11 @@ class PlacementTaskAdminUpdateSerializer(serializers.ModelSerializer):
 
     def validate_status(self, value: str) -> str:
         allowed = {
+            PlacementTask.Status.CREATED,
             PlacementTask.Status.PENDING,
             PlacementTask.Status.IN_PROGRESS,
             PlacementTask.Status.COMPLETED,
+            PlacementTask.Status.FAILED,
             PlacementTask.Status.CANCELLED,
         }
         if value not in allowed:
@@ -187,6 +223,7 @@ class PlacementTaskAdminUpdateSerializer(serializers.ModelSerializer):
                 .get(pk=instance.pk)
             )
             if new_status == PlacementTask.Status.CANCELLED and task.status in (
+                PlacementTask.Status.CREATED,
                 PlacementTask.Status.PENDING,
                 PlacementTask.Status.IN_PROGRESS,
             ):
@@ -243,10 +280,26 @@ class PlanogramReadSerializer(serializers.ModelSerializer):
     product = ProductBriefSerializer(read_only=True)
     slot = serializers.SerializerMethodField()
     stock_quantity = serializers.SerializerMethodField()
+    current_qty = serializers.SerializerMethodField()
+    max_capacity = serializers.SerializerMethodField()
 
     class Meta:
         model = Planogram
-        fields = ("id", "slot", "product", "target_quantity", "stock_quantity")
+        fields = (
+            "id",
+            "slot",
+            "product",
+            "target_quantity",
+            "current_qty",
+            "max_capacity",
+            "stock_quantity",
+        )
+
+    def get_current_qty(self, obj: Planogram) -> int:
+        return int(obj.slot.current_qty or 0)
+
+    def get_max_capacity(self, obj: Planogram) -> int:
+        return int(obj.slot.max_capacity or 0)
 
     def get_stock_quantity(self, obj: Planogram) -> int:
         row = StockItem.objects.filter(product_id=obj.product_id).first()
@@ -267,9 +320,40 @@ class PlanogramWriteSerializer(serializers.ModelSerializer):
         fields = ("slot", "product", "target_quantity")
 
     def validate_target_quantity(self, value: int) -> int:
-        if value < 1:
+        if value is not None and value < 1:
             raise serializers.ValidationError("Целевое количество должно быть не меньше 1.")
         return value
+
+    def _apply_capacity_defaults(self, planogram: Planogram) -> Planogram:
+        from .spatial_engine import refresh_slot_max_capacity
+
+        cap = refresh_slot_max_capacity(planogram.slot, planogram.product)
+        if int(planogram.target_quantity or 0) < 1 and cap > 0:
+            planogram.target_quantity = cap
+            planogram.save(update_fields=["target_quantity"])
+        elif cap > 0 and int(planogram.target_quantity) > cap:
+            planogram.target_quantity = cap
+            planogram.save(update_fields=["target_quantity"])
+        return planogram
+
+    def create(self, validated_data):
+        planogram = super().create(validated_data)
+        return self._apply_capacity_defaults(planogram)
+
+    def update(self, instance, validated_data):
+        planogram = super().update(instance, validated_data)
+        return self._apply_capacity_defaults(planogram)
+
+
+class PlacementChatMessageSerializer(serializers.ModelSerializer):
+    sender = UserBriefSerializer(read_only=True)
+
+    class Meta:
+        from .models import PlacementChatMessage
+
+        model = PlacementChatMessage
+        fields = ("id", "placement_task", "sender", "text", "image_url", "created_at")
+        read_only_fields = ("id", "placement_task", "sender", "image_url", "created_at")
 
 
 class StockItemSerializer(serializers.ModelSerializer):
@@ -450,3 +534,99 @@ class InventorySerializer(serializers.ModelSerializer):
         if obj.shelf_id is None:
             return None
         return RackBriefSerializer(obj.shelf.equipment).data
+
+
+class StaffTaskReadSerializer(serializers.ModelSerializer):
+    created_by = UserBriefSerializer(read_only=True)
+    assigned_to = UserBriefSerializer(read_only=True)
+    zone_name = serializers.CharField(source="zone.name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = StaffTask
+        fields = (
+            "id",
+            "title",
+            "description",
+            "status",
+            "created_by",
+            "assigned_to",
+            "zone",
+            "zone_name",
+            "equipment",
+            "slot",
+            "requires_photo",
+            "photo_url",
+            "created_at",
+            "completed_at",
+        )
+        read_only_fields = (
+            "id",
+            "status",
+            "created_by",
+            "photo_url",
+            "created_at",
+            "completed_at",
+        )
+
+
+class StaffTaskWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StaffTask
+        fields = (
+            "title",
+            "description",
+            "assigned_to",
+            "zone",
+            "equipment",
+            "slot",
+            "requires_photo",
+        )
+
+    def validate_title(self, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Укажите заголовок поручения.")
+        return value
+
+
+class StaffTaskAdminUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StaffTask
+        fields = ("status", "assigned_to")
+
+    def validate_status(self, value: str) -> str:
+        allowed = {
+            StaffTask.Status.CREATED,
+            StaffTask.Status.IN_PROGRESS,
+            StaffTask.Status.COMPLETED,
+            StaffTask.Status.CANCELLED,
+        }
+        if value not in allowed:
+            raise serializers.ValidationError("Недопустимый статус.")
+        return value
+
+
+class ChatMessageSerializer(serializers.ModelSerializer):
+    sender = UserBriefSerializer(read_only=True)
+
+    class Meta:
+        model = ChatMessage
+        fields = ("id", "staff_task", "sender", "text", "image_url", "created_at")
+        read_only_fields = ("id", "staff_task", "sender", "image_url", "created_at")
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        image_url = data.get("image_url")
+        if image_url and image_url.startswith("/"):
+            request = self.context.get("request")
+            if request is not None:
+                data["image_url"] = request.build_absolute_uri(image_url)
+        return data
+
+
+class ChatMessageCreateSerializer(serializers.Serializer):
+    text = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+
+
+class SlotQrVerifySerializer(serializers.Serializer):
+    qr_token = serializers.UUIDField()

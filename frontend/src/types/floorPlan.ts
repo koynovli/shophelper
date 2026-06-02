@@ -33,10 +33,14 @@ export interface EquipmentSlot {
   row_index: number;
   col_index: number;
   width_percent: number;
+  current_qty?: number;
+  max_capacity?: number;
   planogram?: {
     id: number;
     product: { id: number; name: string; sku: string };
     target_quantity: number;
+    current_qty?: number;
+    max_capacity?: number;
     stock_quantity?: number;
     pending_quantity?: number;
     replenishment_status?: 'OK' | 'IN_PROGRESS' | 'DEFICIT' | string;
@@ -63,6 +67,23 @@ function parseFiniteNumber(value: unknown, fallback = 0): number {
     }
   }
   return fallback;
+}
+
+export function slotFillMetrics(slot: EquipmentSlot): {
+  current: number;
+  cap: number;
+  percent: number | null;
+  below30: boolean;
+} {
+  const cap = Math.max(0, Number(slot.max_capacity ?? slot.planogram?.max_capacity ?? 0));
+  const current = Math.max(0, Number(slot.current_qty ?? slot.planogram?.current_qty ?? 0));
+  const percent = cap > 0 ? Math.min(100, Math.round((current / cap) * 100)) : null;
+  return {
+    current,
+    cap,
+    percent,
+    below30: cap > 0 && current < cap * 0.3,
+  };
 }
 
 export function normalizeFloorEquipment(raw: Record<string, unknown>): FloorEquipment {

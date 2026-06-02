@@ -32,7 +32,7 @@ import type {
   FloorEquipmentType,
   FloorZone,
 } from '../types/floorPlan';
-import { normalizeFloorEquipment } from '../types/floorPlan';
+import { normalizeFloorEquipment, slotFillMetrics } from '../types/floorPlan';
 import {
   magneticSnapTopLeftPx,
   obbIntersectPx,
@@ -282,7 +282,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       return;
     }
     try {
-      const response = await api.get('/placement-tasks/', { params: { status: 'PENDING' } });
+      const response = await api.get('/placement-tasks/', { params: { status: 'CREATED' } });
       const rows = extractApiList<MerchTaskRow>(response.data);
       setPendingTaskEquipmentIds(new Set(rows.map((row) => row.equipment.id)));
     } catch {
@@ -872,7 +872,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
     setMerchFeedback(null);
     try {
       const [taskRes, prodRes] = await Promise.all([
-        api.get('/placement-tasks/', { params: { equipment: equipmentId, status: 'PENDING' } }),
+        api.get('/placement-tasks/', { params: { equipment: equipmentId, status: 'CREATED' } }),
         api.get('/products/'),
       ]);
       const taskList = extractApiList<MerchTaskRow>(taskRes.data);
@@ -903,6 +903,26 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       setMerchLoading(false);
     }
   }, [refreshEquipmentFromServer]);
+
+  const handleSimulateSale = useCallback(async (): Promise<void> => {
+    if (!selectedSlot?.planogram || !merchEquipmentId) {
+      return;
+    }
+    setMerchSaving(true);
+    setMerchFeedback(null);
+    try {
+      await api.post(`/slots/${selectedSlot.id}/adjust-qty/`, { delta: -1 });
+      await fetchMerchData(merchEquipmentId);
+      setMerchFeedback({
+        type: 'ok',
+        text: 'Продажа −1: остаток на слоте уменьшен. При заполнении < 30% создаётся задача CREATED.',
+      });
+    } catch {
+      setMerchFeedback({ type: 'err', text: 'Не удалось симулировать продажу.' });
+    } finally {
+      setMerchSaving(false);
+    }
+  }, [selectedSlot, merchEquipmentId, fetchMerchData]);
 
   const openMerchModal = useCallback(
     (equipment: FloorEquipment): void => {
@@ -1548,11 +1568,12 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                             const isActive = slot.id === selectedSlotId;
                             const hasPlanogram = Boolean(slot.planogram);
                             const replStatus = slot.planogram?.replenishment_status;
+                            const fill = slotFillMetrics(slot);
                             const statusClass =
-                              replStatus === 'IN_PROGRESS'
-                                ? 'border-amber-500/70 bg-amber-900/25 text-amber-100'
-                                : replStatus === 'DEFICIT'
-                                  ? 'border-rose-500/70 bg-rose-900/30 text-rose-100'
+                              fill.below30 || replStatus === 'DEFICIT'
+                                ? 'border-rose-500/70 bg-rose-900/30 text-rose-100'
+                                : replStatus === 'IN_PROGRESS'
+                                  ? 'border-amber-500/70 bg-amber-900/25 text-amber-100'
                                   : hasPlanogram
                                     ? 'border-emerald-600/60 bg-emerald-900/25 text-emerald-100'
                                     : 'border-slate-600 bg-slate-800/70 text-slate-300';
@@ -1569,16 +1590,22 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                                 {slot.planogram ? (
                                   <>
                                     <div className="font-semibold">{slot.planogram.product.name}</div>
-                                    <div className="mt-1 text-[11px] text-emerald-200/90">
-                                      Цель: {slot.planogram.target_quantity} шт.
+                                    <div className="mt-1 text-[11px] font-medium text-sky-100">
+                                      На полке: {fill.current} / {fill.cap || '—'} шт.
+                                      {fill.percent !== null ? ` (${fill.percent}%)` : ''}
                                     </div>
+                                    <div className="mt-1 text-[11px] text-emerald-200/90">
+                                      Цель планограммы: {slot.planogram.target_quantity} шт.
+                                    </div>
+                                    {fill.below30 ? (
+                                      <div className="mt-1 text-[10px] text-rose-100">
+                                        &lt; 30% — нужна выкладка
+                                      </div>
+                                    ) : null}
                                     {replStatus === 'IN_PROGRESS' ? (
                                       <div className="mt-1 text-[10px] text-amber-100">
                                         В процессе пополнения
                                       </div>
-                                    ) : null}
-                                    {replStatus === 'DEFICIT' ? (
-                                      <div className="mt-1 text-[10px] text-rose-100">Дефицит</div>
                                     ) : null}
                                   </>
                                 ) : (
@@ -1639,6 +1666,37 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                     />
                   </label>
                 </div>
+                {selectedSlot?.planogram ? (
+                  <div className="mt-3 space-y-2">
+                    {(() => {
+                      const fill = slotFillMetrics(selectedSlot);
+                      const barWidth =
+                        fill.percent !== null ? `${fill.percent}%` : '0%';
+                      return (
+                        <>
+                          <div className="flex justify-between text-xs text-slate-400">
+                            <span>Заполнение слота</span>
+                            <span>
+                              {fill.current} / {fill.cap || '—'} шт.
+                            </span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                            <div
+                              className={`h-full transition-all ${
+                                fill.below30 ? 'bg-rose-500' : 'bg-emerald-500'
+                              }`}
+                              style={{ width: barWidth }}
+                            />
+                          </div>
+                          <p className="text-[11px] text-slate-500">
+                            При остатке &lt; 30% от вместимости система создаёт задачу выкладки
+                            (CREATED).
+                          </p>
+                        </>
+                      );
+                    })()}
+                  </div>
+                ) : null}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -1647,6 +1705,14 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                     className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                   >
                     Сохранить
+                  </button>
+                  <button
+                    type="button"
+                    disabled={merchSaving || !selectedSlot?.planogram}
+                    onClick={() => void handleSimulateSale()}
+                    className="rounded-md border border-amber-500/70 bg-amber-900/40 px-4 py-2 text-sm font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-50"
+                  >
+                    Симулировать продажу (−1)
                   </button>
                   <button
                     type="button"

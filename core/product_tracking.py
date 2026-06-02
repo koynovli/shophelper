@@ -64,6 +64,7 @@ def product_tracking_base_qs(store_id: int):
             | Q(
                 placement_tasks__equipment__zone__store_id=store_id,
                 placement_tasks__status__in=(
+                    PlacementTask.Status.CREATED,
                     PlacementTask.Status.PENDING,
                     PlacementTask.Status.IN_PROGRESS,
                 ),
@@ -89,7 +90,16 @@ def annotate_product_tracking(qs, store_id: int):
         .values("s")[:1]
     )
     stock_qty = StockItem.objects.filter(product_id=OuterRef("pk")).values("quantity")[:1]
-    hall_sum = (
+    hall_slot_sum = (
+        Planogram.objects.filter(
+            product_id=OuterRef("pk"),
+            slot__equipment__zone__store_id=store_id,
+        )
+        .values("product_id")
+        .annotate(s=Sum("slot__current_qty"))
+        .values("s")[:1]
+    )
+    hall_inv_sum = (
         Inventory.objects.filter(
             product_id=OuterRef("pk"),
             store_id=store_id,
@@ -103,6 +113,7 @@ def annotate_product_tracking(qs, store_id: int):
         PlacementTask.objects.filter(
             product_id=OuterRef("pk"),
             status__in=(
+                PlacementTask.Status.CREATED,
                 PlacementTask.Status.PENDING,
                 PlacementTask.Status.IN_PROGRESS,
             ),
@@ -141,7 +152,8 @@ def annotate_product_tracking(qs, store_id: int):
             0,
         ),
         hall_qty=Coalesce(
-            Subquery(hall_sum, output_field=IntegerField()),
+            Subquery(hall_slot_sum, output_field=IntegerField()),
+            Subquery(hall_inv_sum, output_field=IntegerField()),
             0,
         ),
         pending_qty=Coalesce(

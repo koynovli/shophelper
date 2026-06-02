@@ -1,4 +1,5 @@
 import math
+import uuid
 from decimal import Decimal
 
 from django.conf import settings
@@ -154,6 +155,11 @@ class Product(models.Model):
         default=False,
         verbose_name="Маркированный товар",
         help_text="Товар с обязательной маркировкой (например, «Честный ЗНАК»).",
+    )
+    is_stackable = models.BooleanField(
+        default=True,
+        verbose_name="Можно штабелировать",
+        help_text="Если False — на полке только один ярус по высоте.",
     )
 
     class Meta:
@@ -636,6 +642,32 @@ class EquipmentSlot(models.Model):
         verbose_name="Ширина (%)",
         help_text="Ширина ячейки в процентах от ширины ряда/полки.",
     )
+    qr_token = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        verbose_name="QR-токен",
+        help_text="UUID для QR-кода полки; сканируется при верификации выкладки.",
+    )
+    shelf = models.ForeignKey(
+        "Shelf",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="equipment_slots",
+        verbose_name="Физическая полка",
+        help_text="Полка с габаритами для расчёта вместимости; если пусто — по row_index.",
+    )
+    current_qty = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Текущий остаток на полке",
+        help_text="Сколько единиц товара сейчас на слоте (витрина).",
+    )
+    max_capacity = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Макс. вместимость",
+        help_text="Рассчитанная вместимость слота для SKU планограммы.",
+    )
 
     class Meta:
         verbose_name = "Слот оборудования"
@@ -650,6 +682,11 @@ class EquipmentSlot(models.Model):
 
     def __str__(self) -> str:
         return f"{self.equipment.name}: ряд {self.row_index}, ячейка {self.col_index}"
+
+    def refresh_max_capacity_for_product(self, product: "Product") -> int:
+        from .spatial_engine import refresh_slot_max_capacity
+
+        return refresh_slot_max_capacity(self, product)
 
 
 class Planogram(models.Model):
@@ -715,9 +752,11 @@ class PlacementTask(models.Model):
     """Задача на выкладку: создаётся автоматически из планограммы и остатка на складе."""
 
     class Status(models.TextChoices):
-        PENDING = "PENDING", "Ожидает"
+        CREATED = "CREATED", "Создана"
+        PENDING = "PENDING", "Ожидает"  # устаревший alias, мигрируется в CREATED
         IN_PROGRESS = "IN_PROGRESS", "Выполняется"
         COMPLETED = "COMPLETED", "Завершено"
+        FAILED = "FAILED", "Проблема"
         CANCELLED = "CANCELLED", "Отменена"
 
     planogram = models.ForeignKey(
@@ -750,8 +789,41 @@ class PlacementTask(models.Model):
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
-        default=Status.PENDING,
+        default=Status.CREATED,
         verbose_name="Статус",
+    )
+    batch = models.ForeignKey(
+        "ProductBatch",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="placement_tasks",
+        verbose_name="Партия (FEFO)",
+        help_text="Партия FEFO, подобранная при создании задачи (списание при COMPLETED).",
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="placement_tasks",
+        verbose_name="Исполнитель",
+    )
+    photo_url = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        verbose_name="Фото отчёта (URL)",
+    )
+    slot_verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="QR слота подтверждён",
+    )
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Завершена",
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
@@ -765,13 +837,164 @@ class PlacementTask(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=("planogram",),
-                condition=models.Q(status="PENDING"),
-                name="uniq_placementtask_pending_planogram",
+                condition=models.Q(status="CREATED"),
+                name="uniq_placementtask_created_planogram",
             ),
         ]
 
     def __str__(self) -> str:
         return f"{self.product} → {self.equipment.name} ({self.quantity} шт., {self.status})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in (
+            self.Status.CREATED,
+            self.Status.PENDING,
+            self.Status.IN_PROGRESS,
+        )
+
+
+class PlacementChatMessage(models.Model):
+    """Чат по задаче на выкладку (проблема на складе / FEFO)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    placement_task = models.ForeignKey(
+        PlacementTask,
+        on_delete=models.CASCADE,
+        related_name="messages",
+        verbose_name="Задача на выкладку",
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="placement_chat_messages",
+        verbose_name="Отправитель",
+    )
+    text = models.TextField(blank=True, verbose_name="Текст")
+    image_url = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        verbose_name="Изображение (URL)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Отправлено")
+
+    class Meta:
+        verbose_name = "Сообщение чата (выкладка)"
+        verbose_name_plural = "Сообщения чата (выкладка)"
+        ordering = ("created_at",)
+
+
+class StaffTask(models.Model):
+    """Ручное поручение менеджера (уборка, проверки и т.п.), необязательно привязано к полке."""
+
+    class Status(models.TextChoices):
+        CREATED = "CREATED", "Создана"
+        IN_PROGRESS = "IN_PROGRESS", "Выполняется"
+        COMPLETED = "COMPLETED", "Завершена"
+        CANCELLED = "CANCELLED", "Отменена"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255, verbose_name="Заголовок")
+    description = models.TextField(blank=True, verbose_name="Описание")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="created_staff_tasks",
+        verbose_name="Создал",
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_tasks",
+        verbose_name="Исполнитель",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.CREATED,
+        verbose_name="Статус",
+    )
+    zone = models.ForeignKey(
+        "Zone",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_tasks",
+        verbose_name="Зона",
+    )
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_tasks",
+        verbose_name="Оборудование",
+    )
+    slot = models.ForeignKey(
+        EquipmentSlot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_tasks",
+        verbose_name="Слот",
+    )
+    requires_photo = models.BooleanField(
+        default=False,
+        verbose_name="Требуется фотоотчёт",
+    )
+    photo_url = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        verbose_name="Фото отчёта (URL)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
+    completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершена")
+
+    class Meta:
+        verbose_name = "Поручение сотруднику"
+        verbose_name_plural = "Поручения сотрудникам"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.title} ({self.status})"
+
+
+class ChatMessage(models.Model):
+    """Сообщение чата, привязанное к ручному поручению StaffTask."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    staff_task = models.ForeignKey(
+        StaffTask,
+        on_delete=models.CASCADE,
+        related_name="messages",
+        verbose_name="Поручение",
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="chat_messages",
+        verbose_name="Отправитель",
+    )
+    text = models.TextField(verbose_name="Текст", blank=True)
+    image_url = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        verbose_name="Изображение (URL)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Отправлено")
+
+    class Meta:
+        verbose_name = "Сообщение чата"
+        verbose_name_plural = "Сообщения чата"
+        ordering = ("created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.sender}: {self.text[:40]}"
 
 
 class Shelf(models.Model):
@@ -854,7 +1077,10 @@ class Shelf(models.Model):
 
         nx = int(sw_mm // pw)
         ny = int(sd_mm // pd)
-        nz = int(sh_mm // ph)
+        if getattr(product, "is_stackable", True):
+            nz = int(sh_mm // ph)
+        else:
+            nz = 1
 
         return nx * ny * nz
 
@@ -915,8 +1141,8 @@ class PlanogramEquipment(models.Model):
     )
 
     class Meta:
-        verbose_name = "Оборудование (планограмма)"
-        verbose_name_plural = "Оборудование (планограмма)"
+        verbose_name = "Legacy: оборудование планограммы"
+        verbose_name_plural = "Legacy: оборудование планограммы (не использовать)"
 
     def __str__(self) -> str:
         return f"{self.name} — {self.store}"
@@ -953,8 +1179,8 @@ class ShelfLevel(models.Model):
     )
 
     class Meta:
-        verbose_name = "Уровень/полка"
-        verbose_name_plural = "Уровни/полки"
+        verbose_name = "Legacy: уровень планограммы"
+        verbose_name_plural = "Legacy: уровни планограммы (не использовать)"
         constraints = [
             models.UniqueConstraint(
                 fields=["equipment", "level_number"],
@@ -983,8 +1209,8 @@ class Placement(models.Model):
     )
 
     class Meta:
-        verbose_name = "Размещение (планограмма)"
-        verbose_name_plural = "Размещения (планограмма)"
+        verbose_name = "Legacy: размещение"
+        verbose_name_plural = "Legacy: размещения (не использовать)"
         constraints = [
             models.UniqueConstraint(
                 fields=["shelf_level", "product"],
@@ -1038,7 +1264,9 @@ class Placement(models.Model):
         return 0
 
 
-class Task(models.Model):
+class LegacyPlanogramTask(models.Model):
+    """Устаревшая задача планограммы (Placement); не используется в API зала."""
+
     class Status(models.TextChoices):
         TODO = "todo", "К выполнению"
         IN_PROGRESS = "in_progress", "В работе"
@@ -1059,7 +1287,7 @@ class Task(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="tasks",
+        related_name="legacy_planogram_tasks",
         verbose_name="Исполнитель",
         help_text="Пользователь, которому назначена задача.",
     )
@@ -1068,7 +1296,7 @@ class Task(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="tasks",
+        related_name="legacy_tasks",
         verbose_name="Размещение",
         help_text="Размещение (планограмма), к которому относится задача.",
     )
@@ -1099,8 +1327,8 @@ class Task(models.Model):
     )
 
     class Meta:
-        verbose_name = "Задача"
-        verbose_name_plural = "Задачи"
+        verbose_name = "Задача (legacy планограмма)"
+        verbose_name_plural = "Задачи (legacy планограмма)"
 
     def __str__(self) -> str:
         return self.title

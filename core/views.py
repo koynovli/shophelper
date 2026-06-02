@@ -17,13 +17,17 @@ from shophelper.utils import parse_data_matrix
 
 from .models import (
     Category,
+    ChatMessage,
     Equipment,
+    EquipmentSlot,
     Inventory,
+    PlacementChatMessage,
     PlacementTask,
     Planogram,
     Product,
     ProductBatch,
     Shelf,
+    StaffTask,
     StockItem,
     SupplyOrder,
     SupplyOrderItem,
@@ -31,22 +35,43 @@ from .models import (
     Zone,
 )
 from .permissions import IsRoleAdmin
+from .placement_chat_service import PlacementChatError, post_placement_chat_message
+from .placement_execution import (
+    PlacementExecutionError,
+    accept_placement_task,
+    complete_placement_task,
+    fail_placement_task,
+    verify_slot,
+)
+from .placement_sync import adjust_slot_quantity
 from .serializers import (
+    ChatMessageCreateSerializer,
+    ChatMessageSerializer,
     EquipmentSerializer,
     InventorySerializer,
     PlacementTaskAdminUpdateSerializer,
     PlanogramReadSerializer,
     PlanogramWriteSerializer,
+    PlacementChatMessageSerializer,
     PlacementTaskReadSerializer,
     PlacementTaskUpdateSerializer,
     ProductBatchSerializer,
     ProductBriefSerializer,
     ProductSerializer,
     ShelfSerializer,
+    SlotQrVerifySerializer,
+    StaffTaskAdminUpdateSerializer,
+    StaffTaskReadSerializer,
+    StaffTaskWriteSerializer,
     StockItemSerializer,
     SupplyOrderSerializer,
     ZoneSerializer,
 )
+from .staff_task_service import StaffTaskError, cancel_staff_task, create_staff_task
+from .staff_task_service import accept_staff_task as accept_staff_task_svc
+from .staff_task_service import complete_staff_task as complete_staff_task_svc
+from .staff_task_service import post_chat_message
+from .task_pool import fetch_task_pool
 
 
 class ScanCodeView(APIView):
@@ -363,20 +388,48 @@ class InventoryViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def shelf_fill_report(self, request):
         """
-        Отчёт по заполненности полок.
-
-        Для каждой полки суммируется фактический остаток (Inventory.quantity).
-        Опорная «макс. вместимость» берётся как максимум из calculate_max_capacity
-        по строкам остатков на этой полке — это верхняя оценка числа мест под один
-        тип SKU в упрощённой 3D-решётке; при нескольких разных товарах показатель
-        ориентировочный (дипломная модель без учёта смешанной укладки).
+        Отчёт заполненности: слоты с планограммой (current_qty / max_capacity)
+        и legacy-срез по Inventory на полке.
         """
+        slot_rows = []
+        planograms = Planogram.objects.select_related(
+            "slot",
+            "slot__equipment",
+            "slot__equipment__zone",
+            "product",
+        ).order_by("slot__equipment_id", "slot__row_index", "slot__col_index")
+        for pg in planograms:
+            slot = pg.slot
+            cap = int(slot.max_capacity or 0)
+            current = int(slot.current_qty or 0)
+            fill_percent = (
+                min(100.0, round(current / cap * 100, 2)) if cap > 0 else None
+            )
+            slot_rows.append(
+                {
+                    "source": "slot",
+                    "slot_id": slot.pk,
+                    "planogram_id": pg.pk,
+                    "product_id": pg.product_id,
+                    "product_name": pg.product.name,
+                    "row_index": slot.row_index,
+                    "col_index": slot.col_index,
+                    "equipment_id": slot.equipment_id,
+                    "equipment_name": slot.equipment.name,
+                    "zone_name": slot.equipment.zone.name,
+                    "current_qty": current,
+                    "max_capacity": cap,
+                    "fill_percent": fill_percent,
+                    "below_30_percent": cap > 0 and current < cap * 0.3,
+                }
+            )
+
         shelves = Shelf.objects.select_related(
             "equipment",
             "equipment__zone",
         ).order_by("equipment_id", "level")
 
-        report = []
+        shelf_rows = []
         for shelf in shelves:
             inv_qs = Inventory.objects.filter(shelf=shelf).select_related("product")
             current_total = sum(inv.quantity for inv in inv_qs)
@@ -397,8 +450,9 @@ class InventoryViewSet(viewsets.ModelViewSet):
             else:
                 fill_percent = None
 
-            report.append(
+            shelf_rows.append(
                 {
+                    "source": "inventory",
                     "shelf_id": shelf.pk,
                     "level": shelf.level,
                     "equipment_id": shelf.equipment_id,
@@ -412,7 +466,10 @@ class InventoryViewSet(viewsets.ModelViewSet):
                 }
             )
 
-        return Response(report, status=status.HTTP_200_OK)
+        return Response(
+            {"slots": slot_rows, "shelves_inventory": shelf_rows},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ProductViewSet(viewsets.ReadOnlyModelViewSet):
@@ -462,12 +519,14 @@ class PlacementTaskFilter(filters.FilterSet):
 class PlacementTaskViewSet(viewsets.ModelViewSet):
     """Задачи на выкладку создаются системой из планограммы и склада; ручного POST нет."""
 
-    http_method_names = ["get", "patch", "delete", "head", "options"]
+    http_method_names = ["get", "patch", "delete", "head", "options", "post"]
     queryset = PlacementTask.objects.select_related(
         "product",
         "equipment",
         "planogram",
         "planogram__slot",
+        "assigned_to",
+        "batch",
     ).all()
     permission_classes = [IsAuthenticated]
     filterset_class = PlacementTaskFilter
@@ -486,6 +545,96 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        try:
+            task = accept_placement_task(int(pk), request.user)
+        except PlacementExecutionError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PlacementTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"], url_path="verify-slot")
+    def verify_slot_action(self, request, pk=None):
+        serializer = SlotQrVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            task = verify_slot(
+                int(pk),
+                request.user,
+                serializer.validated_data["qr_token"],
+            )
+        except PlacementExecutionError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PlacementTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        photo = request.FILES.get("photo")
+        try:
+            task = complete_placement_task(int(pk), request.user, photo)
+        except PlacementExecutionError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PlacementTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"], url_path="fail")
+    def fail_action(self, request, pk=None):
+        reason = (request.data.get("reason") or "").strip()
+        try:
+            task = fail_placement_task(int(pk), request.user, reason=reason)
+        except PlacementExecutionError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PlacementTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["get", "post"], url_path="messages")
+    def messages(self, request, pk=None):
+        task = self.get_object()
+        if request.method == "GET":
+            qs = PlacementChatMessage.objects.filter(placement_task=task).select_related(
+                "sender",
+            )
+            return Response(PlacementChatMessageSerializer(qs, many=True).data)
+        text = (request.data.get("text") or "").strip()
+        image = request.FILES.get("image")
+        try:
+            message = post_placement_chat_message(
+                task.pk,
+                request.user,
+                text=text,
+                image_file=image,
+            )
+        except PlacementChatError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            PlacementChatMessageSerializer(message).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class EquipmentSlotAdjustView(APIView):
+    """Симуляция продажи/коррекции остатка на слоте (уменьшает current_qty)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        delta = int(request.data.get("delta", 0))
+        if delta == 0:
+            return Response(
+                {"detail": "Укажите ненулевой delta (отрицательный — продажа)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            adjust_slot_quantity(pk, delta)
+        except EquipmentSlot.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        slot = EquipmentSlot.objects.get(pk=pk)
+        return Response(
+            {
+                "id": slot.pk,
+                "current_qty": slot.current_qty,
+                "max_capacity": slot.max_capacity,
+            },
+        )
 
 
 class PlanogramFilter(filters.FilterSet):
@@ -524,3 +673,141 @@ class StockItemViewSet(viewsets.ModelViewSet):
         if self.request.method in SAFE_METHODS:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsRoleAdmin()]
+
+
+class StaffTaskFilter(filters.FilterSet):
+    class Meta:
+        model = StaffTask
+        fields = ("status", "assigned_to", "zone")
+
+
+class StaffTaskViewSet(viewsets.ModelViewSet):
+    queryset = StaffTask.objects.select_related(
+        "created_by",
+        "assigned_to",
+        "zone",
+        "equipment",
+        "slot",
+    ).all()
+    permission_classes = [IsAuthenticated]
+    filterset_class = StaffTaskFilter
+    lookup_field = "pk"
+
+    def get_serializer_class(self):
+        if self.action in ("create",):
+            return StaffTaskWriteSerializer
+        if self.action in ("partial_update", "update"):
+            return StaffTaskAdminUpdateSerializer
+        return StaffTaskReadSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "partial_update", "update", "destroy"):
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+    def create(self, request, *args, **kwargs):
+        serializer = StaffTaskWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            task = create_staff_task(
+                request.user,
+                title=data["title"],
+                description=data.get("description", ""),
+                assigned_to=data.get("assigned_to"),
+                zone=data.get("zone"),
+                equipment=data.get("equipment"),
+                slot=data.get("slot"),
+                requires_photo=data.get("requires_photo", False),
+            )
+        except StaffTaskError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            StaffTaskReadSerializer(task).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        try:
+            task = accept_staff_task_svc(pk, request.user)
+        except StaffTaskError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(StaffTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        photo = request.FILES.get("photo")
+        try:
+            task = complete_staff_task_svc(pk, request.user, photo)
+        except StaffTaskError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(StaffTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        try:
+            task = cancel_staff_task(pk, request.user)
+        except StaffTaskError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(StaffTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["get", "post"], url_path="messages")
+    def messages(self, request, pk=None):
+        task = self.get_object()
+        if request.method == "GET":
+            qs = ChatMessage.objects.filter(staff_task=task).select_related("sender")
+            return Response(
+                ChatMessageSerializer(qs, many=True, context={"request": request}).data
+            )
+        serializer = ChatMessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        image = request.FILES.get("image")
+        try:
+            message = post_chat_message(
+                task.pk,
+                request.user,
+                text=serializer.validated_data.get("text", ""),
+                image_file=image,
+            )
+        except StaffTaskError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            ChatMessageSerializer(message, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TaskPoolView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        status_filter = request.query_params.get("status")
+        task_type = request.query_params.get("task_type")
+        assigned_to = request.query_params.get("assigned_to")
+        assigned_to_id = int(assigned_to) if assigned_to and assigned_to.isdigit() else None
+        items = fetch_task_pool(
+            status=status_filter,
+            task_type=task_type,
+            assigned_to_id=assigned_to_id,
+            user=request.user,
+        )
+        return Response(items)
+
+
+class EquipmentSlotQrView(APIView):
+    permission_classes = [IsAuthenticated, IsRoleAdmin]
+
+    def get(self, request, pk: int):
+        slot = EquipmentSlot.objects.select_related("equipment").filter(pk=pk).first()
+        if slot is None:
+            return Response({"detail": "Слот не найден."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {
+                "slot_id": slot.pk,
+                "equipment": slot.equipment.name,
+                "row_index": slot.row_index,
+                "col_index": slot.col_index,
+                "qr_token": str(slot.qr_token),
+            }
+        )
