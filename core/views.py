@@ -43,7 +43,9 @@ from .placement_execution import (
     fail_placement_task,
     verify_slot,
 )
+from .expiry_writeoff import write_off_expired_shelf_stock
 from .placement_sync import adjust_slot_quantity
+from .product_tracking import resolve_store_id
 from .serializers import (
     ChatMessageCreateSerializer,
     ChatMessageSerializer,
@@ -384,6 +386,19 @@ class InventoryViewSet(viewsets.ModelViewSet):
         "shelf__equipment",
     )
     serializer_class = InventorySerializer
+
+    def get_permissions(self):
+        if self.action == "write_off_expired":
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return super().get_permissions()
+
+    @action(detail=False, methods=["post"], url_path="write-off-expired")
+    def write_off_expired(self, request):
+        """Списать просроченный товар с полок (партия последней выкладки)."""
+        store_id = resolve_store_id(request)
+        dry_run = request.query_params.get("dry_run", "").lower() in ("1", "true", "yes")
+        result = write_off_expired_shelf_stock(store_id=store_id, dry_run=dry_run)
+        return Response(result.to_dict(), status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"])
     def shelf_fill_report(self, request):

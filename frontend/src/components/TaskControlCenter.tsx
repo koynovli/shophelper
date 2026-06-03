@@ -302,16 +302,19 @@ export function TaskControlCenter(): React.ReactElement {
                           >
                             Чат
                           </button>
-                          {task.status === 'FAILED' && task.photo_url ? (
-                            <a
-                              href={resolveMediaUrl(task.photo_url)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-amber-200 underline"
-                            >
-                              Фото
-                            </a>
-                          ) : null}
+                          {task.status === 'FAILED' && task.photo_url ? (() => {
+                            const photoHref = resolveMediaUrl(task.photo_url);
+                            return photoHref ? (
+                              <a
+                                href={photoHref}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-xs text-amber-200 underline"
+                              >
+                                Фото
+                              </a>
+                            ) : null;
+                          })() : null}
                           <button
                             type="button"
                             disabled={

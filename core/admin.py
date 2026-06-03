@@ -18,6 +18,7 @@ from .models import (
     ProductBatch,
     Shelf,
     ShelfLevel,
+    ShelfWriteOff,
     StaffTask,
     StockItem,
     Store,
@@ -222,6 +223,25 @@ class PlacementTaskAdmin(admin.ModelAdmin):
     list_filter = ("status", "equipment__zone__store")
     search_fields = ("product__name", "product__sku", "equipment__name")
     autocomplete_fields = ("planogram", "product", "equipment", "assigned_to", "batch")
+
+
+@admin.register(ShelfWriteOff)
+class ShelfWriteOffAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "created_at",
+        "store",
+        "product",
+        "slot",
+        "batch",
+        "quantity",
+        "reason",
+        "placement_task",
+    )
+    list_filter = ("reason", "store", "created_at")
+    search_fields = ("product__name", "product__sku")
+    autocomplete_fields = ("store", "slot", "product", "batch", "planogram", "placement_task")
+    readonly_fields = ("created_at",)
 
 
 @admin.register(StaffTask)

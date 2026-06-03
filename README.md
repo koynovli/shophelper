@@ -51,6 +51,24 @@ Channels использует Redis при заданном `REDIS_URL`.
 
 Симуляция продажи со слота: `POST /api/slots/{id}/adjust-qty/` с телом `{"delta": -2}`.
 
+## Автосписание просрочки с полок
+
+Если **партия последней завершённой выкладки** на слот просрочена (`expiration_date < сегодня`), остаток на слоте (`current_qty`) обнуляется, пишется журнал `ShelfWriteOff`, срабатывает триггер пополнения 30%.
+
+```bash
+# Просмотр без изменений
+python manage.py write_off_expired_shelf --dry-run
+
+# Списание (все магазины или --store-id N)
+python manage.py write_off_expired_shelf
+```
+
+API (админ): `POST /api/inventory/write-off-expired/` (query `dry_run=true` для пробного прогона).
+
+**Ограничение:** учитывается только последняя `COMPLETED` выкладка с `batch`; слоты без такой истории не списываются автоматически.
+
+Рекомендуется запускать **ежедневно** (Планировщик заданий Windows / cron).
+
 ## Как проверить MVP за 2 минуты
 
 1. `python manage.py migrate`

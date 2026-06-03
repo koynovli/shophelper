@@ -885,6 +885,75 @@ class PlacementChatMessage(models.Model):
         ordering = ("created_at",)
 
 
+class ShelfWriteOff(models.Model):
+    """Журнал автоматического списания просроченного товара с витрины (слота)."""
+
+    class Reason(models.TextChoices):
+        EXPIRED_PLACEMENT_BATCH = (
+            "EXPIRED_PLACEMENT_BATCH",
+            "Просрочена партия последней выкладки",
+        )
+
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="shelf_write_offs",
+        verbose_name="Магазин",
+    )
+    slot = models.ForeignKey(
+        EquipmentSlot,
+        on_delete=models.CASCADE,
+        related_name="write_offs",
+        verbose_name="Слот",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="shelf_write_offs",
+        verbose_name="Товар",
+    )
+    batch = models.ForeignKey(
+        ProductBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="shelf_write_offs",
+        verbose_name="Партия",
+    )
+    planogram = models.ForeignKey(
+        Planogram,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_offs",
+        verbose_name="Планограмма",
+    )
+    placement_task = models.ForeignKey(
+        PlacementTask,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="shelf_write_offs",
+        verbose_name="Задача выкладки",
+    )
+    quantity = models.PositiveIntegerField(verbose_name="Списано, шт.")
+    reason = models.CharField(
+        max_length=40,
+        choices=Reason.choices,
+        default=Reason.EXPIRED_PLACEMENT_BATCH,
+        verbose_name="Причина",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+
+    class Meta:
+        verbose_name = "Списание с полки"
+        verbose_name_plural = "Списания с полок"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.product} −{self.quantity} шт. ({self.slot_id})"
+
+
 class StaffTask(models.Model):
     """Ручное поручение менеджера (уборка, проверки и т.п.), необязательно привязано к полке."""
 

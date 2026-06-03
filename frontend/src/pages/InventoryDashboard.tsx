@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { AxiosError } from 'axios';
-import { Download, Loader2, MapPinned, Search, X } from 'lucide-react';
+import { Download, Loader2, MapPinned, Search, Trash2, X } from 'lucide-react';
 
 import api from '../api';
 
@@ -97,6 +97,8 @@ export function InventoryDashboard(): React.ReactElement {
   const [detail, setDetail] = useState<ProductDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [writeOffBusy, setWriteOffBusy] = useState(false);
+  const [writeOffMsg, setWriteOffMsg] = useState<string | null>(null);
 
   useEffect(() => {
     const t = window.setTimeout(() => setSearchDebounced(search.trim()), 350);
@@ -211,6 +213,34 @@ export function InventoryDashboard(): React.ReactElement {
     navigate(`/admin?tab=map&equipmentId=${equipmentId}`);
   };
 
+  const runWriteOffExpired = async (dryRun: boolean): Promise<void> => {
+    setWriteOffBusy(true);
+    setWriteOffMsg(null);
+    setError(null);
+    try {
+      const r = await api.post<{
+        slots_written_off: number;
+        units_written_off: number;
+        dry_run: boolean;
+      }>('/inventory/write-off-expired/', null, {
+        params: dryRun ? { dry_run: 'true' } : {},
+      });
+      const prefix = r.data.dry_run ? '[Пробный прогон] ' : '';
+      setWriteOffMsg(
+        `${prefix}Списано слотов: ${r.data.slots_written_off}, единиц: ${r.data.units_written_off}`,
+      );
+      if (!dryRun) {
+        void loadRows();
+      }
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      const d = ax.response?.data?.detail;
+      setError(typeof d === 'string' ? d : 'Не удалось выполнить списание.');
+    } finally {
+      setWriteOffBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -220,15 +250,41 @@ export function InventoryDashboard(): React.ReactElement {
             Сводка по партиям, складу (StockItem), залу (остатки на полке) и активным задачам выкладки.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void exportCsv()}
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 hover:border-emerald-500/50"
-        >
-          <Download className="h-4 w-4" />
-          Экспорт CSV
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={writeOffBusy}
+            onClick={() => void runWriteOffExpired(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 hover:border-amber-500/50 disabled:opacity-50"
+          >
+            {writeOffBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Проверить просрочку
+          </button>
+          <button
+            type="button"
+            disabled={writeOffBusy}
+            onClick={() => void runWriteOffExpired(false)}
+            className="inline-flex items-center gap-2 rounded-lg border border-rose-500/60 bg-rose-950/40 px-3 py-2 text-sm text-rose-100 hover:bg-rose-900/50 disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            Списать с полок
+          </button>
+          <button
+            type="button"
+            onClick={() => void exportCsv()}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 hover:border-emerald-500/50"
+          >
+            <Download className="h-4 w-4" />
+            Экспорт CSV
+          </button>
+        </div>
       </div>
+
+      {writeOffMsg ? (
+        <div className="rounded-lg border border-sky-500/40 bg-sky-950/30 px-3 py-2 text-sm text-sky-100">
+          {writeOffMsg}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded-lg border border-rose-500/40 bg-rose-950/30 px-3 py-2 text-sm text-rose-100">{error}</div>
