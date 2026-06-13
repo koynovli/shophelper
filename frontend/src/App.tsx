@@ -1,9 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Boxes,
-  CalendarDays,
   ClipboardList,
-  Factory,
   Inbox,
   LogOut,
   Map,
@@ -13,7 +11,6 @@ import {
 } from 'lucide-react';
 import { Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom';
 
-import api from './api';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { useAuth } from './auth/AuthContext';
 import StoreMap from './components/StoreMap';
@@ -23,39 +20,21 @@ import { MapEditModeProvider } from './map/MapEditModeContext';
 import { MapModeToolbar } from './components/MapModeToolbar';
 import { EmployeeDashboard } from './pages/EmployeeDashboard';
 import { InventoryDashboard } from './pages/InventoryDashboard';
+import { ProductCatalogPage } from './pages/ProductCatalogPage';
+import { SupplyOrdersPage } from './pages/SupplyOrdersPage';
 import { LoginPage } from './pages/LoginPage';
 import { NoAccess } from './pages/NoAccess';
 
-type AdminTab = 'orders' | 'map' | 'receiving' | 'tasks' | 'inventory';
+type AdminTab = 'orders' | 'catalog' | 'map' | 'receiving' | 'tasks' | 'inventory';
 
-const VALID_ADMIN_TABS: AdminTab[] = ['orders', 'map', 'receiving', 'tasks', 'inventory'];
-
-type Supplier = {
-  id: number;
-  name: string;
-};
-
-type SupplyOrder = {
-  id: number;
-  status: string;
-  created_at: string;
-  supplier: number | null;
-  supplier_detail?: Supplier | null;
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  draft: 'Черновик',
-  sent: 'Отправлен',
-  received: 'Принят',
-  cancelled: 'Отменен',
-};
-
-const STATUS_STYLES: Record<string, string> = {
-  draft: 'bg-slate-700/60 text-slate-200 border-slate-600',
-  sent: 'bg-blue-900/40 text-blue-200 border-blue-700/50',
-  received: 'bg-emerald-900/40 text-emerald-200 border-emerald-700/50',
-  cancelled: 'bg-rose-900/40 text-rose-200 border-rose-700/50',
-};
+const VALID_ADMIN_TABS: AdminTab[] = [
+  'orders',
+  'catalog',
+  'map',
+  'receiving',
+  'tasks',
+  'inventory',
+];
 
 function App() {
   const { user, logout } = useAuth();
@@ -65,56 +44,6 @@ function App() {
     logout();
     navigate('/login', { replace: true });
   };
-  const [orders, setOrders] = useState<SupplyOrder[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-
-  useEffect(() => {
-    const fetchOrders = async (): Promise<void> => {
-      try {
-        const response = await api.get<SupplyOrder[]>('/supply-orders/');
-        setOrders(response.data);
-      } catch (error) {
-        console.error('Не удалось загрузить список заказов:', error);
-        setOrders([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchOrders();
-  }, []);
-
-  const hasOrders = useMemo(() => orders.length > 0, [orders]);
-
-  const formatDate = (dateString: string): string => {
-    if (!dateString) {
-      return '—';
-    }
-    const parsedDate = new Date(dateString);
-    if (Number.isNaN(parsedDate.getTime())) {
-      return dateString;
-    }
-    return new Intl.DateTimeFormat('ru-RU', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }).format(parsedDate);
-  };
-
-  const getSupplierName = (order: SupplyOrder): string => {
-    if (order.supplier_detail?.name) {
-      return order.supplier_detail.name;
-    }
-    if (order.supplier !== null) {
-      return `Поставщик #${order.supplier}`;
-    }
-    return 'Не указан';
-  };
-
-  const getStatusLabel = (status: string): string => STATUS_LABELS[status] ?? status;
-
-  const getStatusStyle = (status: string): string =>
-    STATUS_STYLES[status] ?? 'bg-slate-700/60 text-slate-200 border-slate-600';
-
   const HomeRedirect = (): React.ReactElement => {
     if (!user) {
       return <Navigate to="/login" replace />;
@@ -217,6 +146,18 @@ function App() {
           </button>
           <button
             type="button"
+            onClick={() => setTab('catalog')}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'catalog'
+                ? 'bg-violet-500/20 text-violet-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <Tag className="h-4 w-4" />
+            Номенклатура
+          </button>
+          <button
+            type="button"
             onClick={() => setTab('map')}
             className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
               activeTab === 'map'
@@ -266,63 +207,9 @@ function App() {
         </div>
 
         {activeTab === 'orders' ? (
-          <>
-            {loading ? (
-              <div className="rounded-3xl border border-slate-800 bg-slate-900 p-10 text-center text-lg text-slate-300 shadow-2xl">
-                Loading...
-              </div>
-            ) : !hasOrders ? (
-              <div className="rounded-3xl border border-slate-800 bg-slate-900 p-10 text-center text-lg text-slate-300 shadow-2xl">
-                Заказы не найдены
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-                {orders.map((order) => (
-                  <article
-                    key={order.id}
-                    className="group rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl transition hover:border-emerald-500/40"
-                  >
-                    <div className="mb-5 flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <ReceiptText className="h-5 w-5 text-emerald-400" />
-                        <h2 className="text-lg font-semibold text-white">
-                          Заказ #{order.id}
-                        </h2>
-                      </div>
-                      <span
-                        className={`rounded-full border px-3 py-1 text-xs font-medium uppercase tracking-wide ${getStatusStyle(order.status)}`}
-                      >
-                        {getStatusLabel(order.status)}
-                      </span>
-                    </div>
-
-                    <div className="space-y-3 text-sm text-slate-300">
-                      <div className="flex items-center gap-3">
-                        <Factory className="h-4 w-4 text-blue-300" />
-                        <span>
-                          Поставщик: <strong className="text-slate-100">{getSupplierName(order)}</strong>
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <Tag className="h-4 w-4 text-amber-300" />
-                        <span>
-                          Статус: <strong className="text-slate-100">{getStatusLabel(order.status)}</strong>
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <CalendarDays className="h-4 w-4 text-indigo-300" />
-                        <span>
-                          Дата создания: <strong className="text-slate-100">{formatDate(order.created_at)}</strong>
-                        </span>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </>
+          <SupplyOrdersPage />
+        ) : activeTab === 'catalog' ? (
+          <ProductCatalogPage />
         ) : activeTab === 'map' ? (
           <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-4 shadow-2xl">
             <MapModeToolbar className="mb-4" />

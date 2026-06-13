@@ -1,0 +1,293 @@
+import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Loader2, X } from 'lucide-react';
+
+import api from '../../api';
+import type { EquipmentSlot, FloorEquipment } from '../../types/floorPlan';
+import { slotFillMetrics } from '../../types/floorPlan';
+
+type ProductBrief = { id: number; name: string; sku: string };
+
+type MerchTaskRow = {
+  id: number;
+  quantity: number;
+  status: string;
+  product: { id: number; name: string; sku: string };
+};
+
+type Props = {
+  open: boolean;
+  equipment: FloorEquipment | null;
+  equipmentName: string;
+  slotsSorted: EquipmentSlot[];
+  selectedSlotId: number | null;
+  onSelectSlot: (id: number) => void;
+  onClose: () => void;
+  merchLoading: boolean;
+  merchSaving: boolean;
+  merchFeedback: { type: 'ok' | 'err'; text: string } | null;
+  merchTasks: MerchTaskRow[];
+  merchProducts: ProductBrief[];
+  merchProductId: string;
+  onMerchProductIdChange: (id: string) => void;
+  merchTargetQty: number;
+  onMerchTargetQtyChange: (qty: number) => void;
+  onSavePlanogram: () => void;
+  onSimulateSale: () => void;
+  onDeletePlanogram: () => void;
+  onCreateTestProduct: () => void;
+};
+
+export function EquipmentDetailPanel({
+  open,
+  equipment,
+  equipmentName,
+  slotsSorted,
+  selectedSlotId,
+  onSelectSlot,
+  onClose,
+  merchLoading,
+  merchSaving,
+  merchFeedback,
+  merchTasks,
+  merchProducts,
+  merchProductId,
+  onMerchProductIdChange,
+  merchTargetQty,
+  onMerchTargetQtyChange,
+  onSavePlanogram,
+  onSimulateSale,
+  onDeletePlanogram,
+  onCreateTestProduct,
+}: Props): React.ReactElement | null {
+  const selectedSlot = slotsSorted.find((s) => s.id === selectedSlotId) ?? null;
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedSlotId || !open) {
+      setQrUrl(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .get<{ qr_token?: string }>(`/slots/${selectedSlotId}/qr/`)
+      .then((res) => {
+        if (!cancelled) {
+          setQrUrl(res.data.qr_token ?? null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setQrUrl(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSlotId, open]);
+
+  if (!open || !equipment) {
+    return null;
+  }
+
+  const rowIndices = Array.from(
+    new Set(slotsSorted.map((s) => s.row_index)),
+  ).sort((a, b) => a - b);
+  const maxRow =
+    rowIndices.length > 0
+      ? rowIndices[rowIndices.length - 1]
+      : Math.max(0, (equipment.rows_count || 1) - 1);
+
+  return (
+    <aside className="fixed right-0 top-0 z-40 flex h-full w-full max-w-md flex-col border-l border-slate-700 bg-slate-900 shadow-2xl">
+      <div className="flex items-start justify-between gap-2 border-b border-slate-700 px-4 py-3">
+        <div>
+          <h3 className="text-base font-semibold text-slate-100">Оборудование</h3>
+          <p className="text-sm text-slate-400">{equipmentName}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg border border-slate-600 p-2 text-slate-300 hover:bg-slate-800"
+          aria-label="Закрыть"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {merchFeedback ? (
+          <p
+            className={`mb-3 rounded-md border px-3 py-2 text-xs ${
+              merchFeedback.type === 'ok'
+                ? 'border-emerald-600/50 bg-emerald-950/40 text-emerald-100'
+                : 'border-amber-600/50 bg-amber-950/30 text-amber-100'
+            }`}
+          >
+            {merchFeedback.text}
+          </p>
+        ) : null}
+
+        <h4 className="mb-2 text-sm font-semibold text-slate-200">Матрица слотов</h4>
+        {merchLoading ? (
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Загрузка…
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {Array.from({ length: maxRow + 1 }).map((_, rowIndex) => {
+              const rowSlots = slotsSorted.filter((s) => s.row_index === rowIndex);
+              return (
+                <div
+                  key={rowIndex}
+                  className="rounded-lg border border-slate-700 bg-slate-950/50 p-2"
+                >
+                  <p className="mb-2 text-[11px] uppercase tracking-wide text-slate-500">
+                    Ряд {rowIndex}
+                  </p>
+                  <div className="flex min-h-[56px] gap-2">
+                    {rowSlots.map((slot) => {
+                      const isActive = slot.id === selectedSlotId;
+                      const fill = slotFillMetrics(slot);
+                      const replStatus = slot.planogram?.replenishment_status;
+                      const statusClass =
+                        fill.below30 || replStatus === 'DEFICIT'
+                          ? 'border-rose-500/70 bg-rose-900/30'
+                          : replStatus === 'IN_PROGRESS' || slot.active_placement_task
+                            ? 'border-amber-500/70 bg-amber-900/25'
+                            : fill.above70
+                              ? 'border-emerald-600/60 bg-emerald-900/25'
+                              : 'border-slate-600 bg-slate-800/70';
+                      return (
+                        <button
+                          key={slot.id}
+                          type="button"
+                          onClick={() => onSelectSlot(slot.id)}
+                          style={{ flex: `0 0 ${slot.width_percent}%` }}
+                          className={`min-h-[56px] rounded-md border px-2 py-1 text-left text-xs ${statusClass} ${
+                            isActive ? 'ring-2 ring-sky-400/80' : ''
+                          }`}
+                        >
+                          {slot.planogram ? (
+                            <>
+                              <div className="truncate font-semibold">
+                                {slot.planogram.product.name}
+                              </div>
+                              <div className="text-[10px] text-sky-100">
+                                {fill.current}/{fill.cap || '—'}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-slate-400">+ товар</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {selectedSlot ? (
+          <div className="mt-4 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+            <h5 className="text-sm font-semibold text-slate-200">
+              Слот: ряд {selectedSlot.row_index}, ячейка {selectedSlot.col_index}
+            </h5>
+            {qrUrl ? (
+              <p className="mt-2 break-all font-mono text-[10px] text-slate-500">
+                QR-токен: {qrUrl}
+              </p>
+            ) : null}
+            <div className="mt-3 flex flex-col gap-2">
+              <label className="text-sm text-slate-300">
+                Товар
+                <select
+                  value={merchProductId}
+                  onChange={(e) => onMerchProductIdChange(e.target.value)}
+                  disabled={merchLoading || merchProducts.length === 0}
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white"
+                >
+                  {merchProducts.map((p) => (
+                    <option key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm text-slate-300">
+                Цель, шт.
+                <input
+                  type="number"
+                  min={1}
+                  value={merchTargetQty}
+                  onChange={(e) =>
+                    onMerchTargetQtyChange(Math.max(1, Number(e.target.value) || 1))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white"
+                />
+              </label>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={merchSaving || !merchProductId}
+                onClick={onSavePlanogram}
+                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+              >
+                Сохранить
+              </button>
+              <button
+                type="button"
+                disabled={merchSaving || !selectedSlot.planogram}
+                onClick={onSimulateSale}
+                className="rounded-md border border-amber-500/60 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-50"
+              >
+                Продажа −1
+              </button>
+              <button
+                type="button"
+                disabled={merchSaving || !selectedSlot.planogram}
+                onClick={onDeletePlanogram}
+                className="rounded-md border border-rose-500/60 px-3 py-1.5 text-xs text-rose-100 disabled:opacity-50"
+              >
+                Очистить
+              </button>
+              <button
+                type="button"
+                disabled={merchSaving}
+                onClick={onCreateTestProduct}
+                className="rounded-md border border-slate-600 px-3 py-1.5 text-xs text-slate-200"
+              >
+                Тестовый товар
+              </button>
+              <Link
+                to="/admin?tab=catalog"
+                className="rounded-md border border-violet-500/50 px-3 py-1.5 text-xs text-violet-100"
+              >
+                Номенклатура
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-4">
+          <h4 className="mb-2 text-sm font-semibold text-slate-200">Задачи выкладки</h4>
+          {merchTasks.length === 0 ? (
+            <p className="text-xs text-slate-500">Нет задач CREATED.</p>
+          ) : (
+            <ul className="space-y-1 text-xs text-slate-300">
+              {merchTasks.map((t) => (
+                <li key={t.id} className="rounded border border-slate-700 px-2 py-1">
+                  {t.product.name}: {t.quantity} шт.
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}

@@ -1,6 +1,7 @@
 import React from 'react';
 
 import type { FloorEquipment } from '../types/floorPlan';
+import { normalizeEquipmentType } from '../types/floorPlan';
 
 type Props = {
   equipment: FloorEquipment;
@@ -42,28 +43,21 @@ function normalizeHex(value: string): string {
 }
 
 function TypeDecoration({ type }: { type: string }): React.ReactElement | null {
-  const t = type === 'shelf' ? 'shelving' : type;
+  const t = normalizeEquipmentType(type);
 
-  if (t === 'pegboard') {
+  if (t === 'hanger') {
     return (
-      <div
-        className="pointer-events-none absolute inset-0 opacity-[0.35]"
-        style={{
-          backgroundImage:
-            'radial-gradient(circle, rgba(148,163,184,0.55) 1px, transparent 1px)',
-          backgroundSize: '8px 8px',
-        }}
-      />
+      <div className="pointer-events-none absolute inset-x-2 top-1/2 h-0.5 -translate-y-1/2 bg-slate-300/70" />
     );
   }
 
   if (t === 'fridge') {
     return (
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-sky-400/15 via-sky-500/10 to-slate-900/40" />
+      <div className="pointer-events-none absolute inset-0 rounded-lg shadow-[inset_0_0_12px_rgba(56,189,248,0.35)] ring-1 ring-sky-400/40" />
     );
   }
 
-  if (t === 'pallet') {
+  if (t === 'box') {
     return (
       <div
         className="pointer-events-none absolute inset-0 opacity-40"
@@ -75,9 +69,9 @@ function TypeDecoration({ type }: { type: string }): React.ReactElement | null {
     );
   }
 
-  if (t === 'display') {
+  if (t === 'mannequin') {
     return (
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/18 via-indigo-400/10 to-transparent" />
+      <div className="pointer-events-none absolute inset-0 rounded-full bg-gradient-to-br from-white/18 via-indigo-400/10 to-transparent" />
     );
   }
 
@@ -104,9 +98,9 @@ export function MapEquipmentItem({
   const pixelWidth = Math.max(equipment.width * pxPerCm, 8);
   const pixelHeight = Math.max(equipment.height * pxPerCm, 8);
 
-  const displayType = equipment.type === 'shelf' ? 'shelving' : equipment.type;
+  const displayType = normalizeEquipmentType(String(equipment.type));
   const shelfLines =
-    (displayType === 'shelving' || displayType === 'fridge' || displayType === 'pegboard') &&
+    (displayType === 'shelf' || displayType === 'fridge' || displayType === 'hanger') &&
     equipment.rows_count > 0
       ? equipment.rows_count
       : 0;
@@ -134,12 +128,14 @@ export function MapEquipmentItem({
         : 'cursor-grab'
       : '';
 
+  const roundedClass = displayType === 'mannequin' ? 'rounded-full' : 'rounded-lg';
+
   return (
     <button
       type="button"
       data-equipment
       title={equipment.name}
-      className={`group absolute overflow-hidden rounded-lg text-left outline-none hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${ringClass} ${cursorClass} ${
+      className={`group absolute overflow-hidden text-left outline-none hover:brightness-110 focus-visible:ring-2 focus-visible:ring-emerald-400 ${roundedClass} ${ringClass} ${cursorClass} ${
         collision ? 'ring-2 ring-red-500/90' : ''
       }`}
       style={{

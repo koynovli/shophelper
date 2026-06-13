@@ -33,6 +33,34 @@ class Store(models.Model):
         return self.name
 
 
+class StoreMap(models.Model):
+    """Границы интерактивной 2D-карты торгового зала (в метрах)."""
+
+    store = models.OneToOneField(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="floor_map",
+        verbose_name="Магазин",
+    )
+    width_m = models.FloatField(
+        default=20.0,
+        verbose_name="Ширина зала (м)",
+        help_text="Ширина торгового зала на плане в метрах.",
+    )
+    length_m = models.FloatField(
+        default=15.0,
+        verbose_name="Длина зала (м)",
+        help_text="Длина торгового зала на плане в метрах.",
+    )
+
+    class Meta:
+        verbose_name = "План зала"
+        verbose_name_plural = "Планы зала"
+
+    def __str__(self) -> str:
+        return f"План {self.store} ({self.width_m}×{self.length_m} м)"
+
+
 class User(AbstractUser):
     class Role(models.TextChoices):
         ADMIN = "admin", "Администратор"
@@ -373,6 +401,17 @@ class SupplyOrder(models.Model):
         verbose_name="Кем принят",
         help_text="Пользователь, зафиксировавший приёмку на складе/в магазине.",
     )
+    has_discrepancies = models.BooleanField(
+        default=False,
+        verbose_name="Есть расхождения",
+        help_text="Фактическое количество хотя бы по одной строке отличается от заказанного.",
+    )
+    planned_receiving_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="Плановая дата приёмки",
+        help_text="Ожидаемая дата поступления товара на склад (план менеджера).",
+    )
 
     class Meta:
         verbose_name = "Заказ поставщику"
@@ -420,6 +459,11 @@ class SupplyOrderItem(models.Model):
         verbose_name="Цена закупки за единицу",
         help_text="Закупочная цена за единицу товара в этой строке.",
     )
+    discrepancy_note = models.TextField(
+        blank=True,
+        verbose_name="Примечание по расхождению",
+        help_text="Комментарий сотрудника, если факт ≠ заказ.",
+    )
 
     class Meta:
         verbose_name = "Позиция заказа"
@@ -427,6 +471,59 @@ class SupplyOrderItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.product} × {self.quantity} (заказ {self.order_id})"
+
+
+class SupplyReceivingTask(models.Model):
+    """Задача приёмки заказа поставщику на склад (исполняет сотрудник)."""
+
+    class Status(models.TextChoices):
+        CREATED = "CREATED", "Создана"
+        IN_PROGRESS = "IN_PROGRESS", "Выполняется"
+        COMPLETED = "COMPLETED", "Завершена"
+        CANCELLED = "CANCELLED", "Отменена"
+
+    supply_order = models.OneToOneField(
+        SupplyOrder,
+        on_delete=models.CASCADE,
+        related_name="receiving_task",
+        verbose_name="Заказ поставщику",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.CREATED,
+        verbose_name="Статус",
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supply_receiving_tasks",
+        verbose_name="Исполнитель",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_supply_receiving_tasks",
+        verbose_name="Кем создана",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Завершена",
+    )
+
+    class Meta:
+        verbose_name = "Задача приёмки заказа"
+        verbose_name_plural = "Задачи приёмки заказов"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"Приёмка заказа #{self.supply_order_id} ({self.status})"
 
 
 class ProductBatch(models.Model):
@@ -557,11 +654,11 @@ class Equipment(models.Model):
     """Оборудование на плане зала (цифровой двойник)."""
 
     class EquipmentType(models.TextChoices):
-        SHELVING = "shelving", "Стеллаж"
-        PEGBOARD = "pegboard", "Перфорированная панель"
+        SHELF = "shelf", "Стеллаж"
+        HANGER = "hanger", "Вешалка"
         FRIDGE = "fridge", "Холодильник"
-        PALLET = "pallet", "Паллета"
-        DISPLAY = "display", "Витрина"
+        BOX = "box", "Бокс / корзина"
+        MANNEQUIN = "mannequin", "Манекен / промо-стенд"
 
     name = models.CharField(
         max_length=255,
@@ -578,7 +675,7 @@ class Equipment(models.Model):
     type = models.CharField(
         max_length=20,
         choices=EquipmentType.choices,
-        default=EquipmentType.SHELVING,
+        default=EquipmentType.SHELF,
         verbose_name="Тип",
         help_text="Тип оборудования для отрисовки и логики.",
     )

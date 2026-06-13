@@ -1,3 +1,9 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Konva canvas defaults to white; keep map grid visible underneath */
+.map-konva-host .konvajs-content,
+.map-konva-host canvas {
+  background: transparent !important;
+}

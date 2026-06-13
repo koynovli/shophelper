@@ -10,6 +10,7 @@ from .product_tracking import (
     ProductTrackingListView,
 )
 from .views import (
+    CategoryViewSet,
     EquipmentSlotAdjustView,
     EquipmentSlotQrView,
     EquipmentViewSet,
@@ -22,19 +23,28 @@ from .views import (
     ShelfViewSet,
     StaffTaskViewSet,
     StockItemViewSet,
+    EmployeeListView,
+    SupplierViewSet,
     SupplyOrderViewSet,
+    SupplyReceivingTaskViewSet,
+    StoreMapView,
     TaskPoolView,
     ZoneViewSet,
 )
 from .serializers import CustomTokenObtainPairSerializer
 
 router = DefaultRouter()
+router.register(r"suppliers", SupplierViewSet, basename="supplier")
 router.register(r"supply-orders", SupplyOrderViewSet, basename="supplyorder")
+router.register(
+    r"receiving-tasks", SupplyReceivingTaskViewSet, basename="receivingtask"
+)
 router.register(r"batches", ProductBatchViewSet, basename="productbatch")
 router.register(r"zones", ZoneViewSet, basename="zone")
 router.register(r"floor-equipment", EquipmentViewSet, basename="floorequipment")
 router.register(r"shelves", ShelfViewSet, basename="shelf")
 router.register(r"inventory", InventoryViewSet, basename="inventory")
+router.register(r"categories", CategoryViewSet, basename="category")
 router.register(r"products", ProductViewSet, basename="product")
 router.register(r"placement-tasks", PlacementTaskViewSet, basename="placementtask")
 router.register(r"staff-tasks", StaffTaskViewSet, basename="stafftask")
@@ -71,7 +81,9 @@ urlpatterns = [
         name="token_refresh",
     ),
     path("scan/", ScanCodeView.as_view(), name="scan-code"),
+    path("store-map/", StoreMapView.as_view(), name="store-map"),
     path("task-pool/", TaskPoolView.as_view(), name="task-pool"),
+    path("employees/", EmployeeListView.as_view(), name="employee-list"),
     path("slots/<int:pk>/qr/", EquipmentSlotQrView.as_view(), name="slot-qr"),
     path(
         "slots/<int:pk>/adjust-qty/",

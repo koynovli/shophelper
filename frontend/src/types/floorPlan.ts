@@ -1,9 +1,9 @@
 export type FloorEquipmentType =
-  | 'shelving'
-  | 'pegboard'
+  | 'shelf'
+  | 'hanger'
   | 'fridge'
-  | 'pallet'
-  | 'display';
+  | 'box'
+  | 'mannequin';
 
 export interface FloorShelf {
   id: number;
@@ -35,6 +35,8 @@ export interface EquipmentSlot {
   width_percent: number;
   current_qty?: number;
   max_capacity?: number;
+  active_placement_task?: boolean;
+  nearest_batch_expiry?: string | null;
   planogram?: {
     id: number;
     product: { id: number; name: string; sku: string };
@@ -53,6 +55,27 @@ export interface FloorZone {
   store: number;
   color: string;
   equipment: FloorEquipment[];
+}
+
+export interface StoreMapDimensions {
+  width_m: number;
+  length_m: number;
+}
+
+const LEGACY_TYPE_MAP: Record<string, FloorEquipmentType> = {
+  shelving: 'shelf',
+  shelf: 'shelf',
+  pegboard: 'hanger',
+  hanger: 'hanger',
+  fridge: 'fridge',
+  pallet: 'box',
+  box: 'box',
+  display: 'mannequin',
+  mannequin: 'mannequin',
+};
+
+export function normalizeEquipmentType(type: string): FloorEquipmentType {
+  return LEGACY_TYPE_MAP[type] ?? 'shelf';
 }
 
 /** Числа из JSON иногда приходят строками; без этого поворот и координаты сбрасывались в 0. */
@@ -74,6 +97,7 @@ export function slotFillMetrics(slot: EquipmentSlot): {
   cap: number;
   percent: number | null;
   below30: boolean;
+  above70: boolean;
 } {
   const cap = Math.max(0, Number(slot.max_capacity ?? slot.planogram?.max_capacity ?? 0));
   const current = Math.max(0, Number(slot.current_qty ?? slot.planogram?.current_qty ?? 0));
@@ -82,15 +106,13 @@ export function slotFillMetrics(slot: EquipmentSlot): {
     current,
     cap,
     percent,
-    below30: cap > 0 && current < cap * 0.3,
+    below30: cap > 0 && current / cap < 0.3,
+    above70: cap > 0 && current / cap > 0.7,
   };
 }
 
 export function normalizeFloorEquipment(raw: Record<string, unknown>): FloorEquipment {
-  let typeRaw = String(raw.type ?? 'shelving');
-  if (typeRaw === 'shelf') {
-    typeRaw = 'shelving';
-  }
+  const typeRaw = String(raw.type ?? 'shelf');
   const rotation = parseFiniteNumber(
     raw.rotation,
     parseFiniteNumber(raw.orientation, 0),
@@ -112,7 +134,7 @@ export function normalizeFloorEquipment(raw: Record<string, unknown>): FloorEqui
     id: Number(raw.id),
     name: String(raw.name ?? ''),
     zone: Number(raw.zone ?? 0),
-    type: typeRaw,
+    type: normalizeEquipmentType(typeRaw),
     pos_x: parseFiniteNumber(raw.pos_x, 0),
     pos_y: parseFiniteNumber(raw.pos_y, 0),
     width: parseFiniteNumber(raw.width, 0),

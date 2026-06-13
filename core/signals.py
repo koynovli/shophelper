@@ -72,7 +72,12 @@ def _generate_default_slots_for_equipment(equipment: Equipment) -> None:
     eq_type = str(equipment.type)
     rows = int(equipment.rows_count or 0)
 
-    if eq_type in (Equipment.EquipmentType.SHELVING, Equipment.EquipmentType.FRIDGE, "shelf"):
+    if eq_type in (
+        Equipment.EquipmentType.SHELF,
+        Equipment.EquipmentType.FRIDGE,
+        "shelf",
+        "shelving",
+    ):
         rows = max(rows, 1)
         for r in range(rows):
             for c in range(4):
@@ -84,7 +89,7 @@ def _generate_default_slots_for_equipment(equipment: Equipment) -> None:
                 )
         return
 
-    if eq_type == Equipment.EquipmentType.PALLET:
+    if eq_type in (Equipment.EquipmentType.BOX, "box", "pallet"):
         EquipmentSlot.objects.create(
             equipment=equipment,
             row_index=0,
@@ -93,19 +98,26 @@ def _generate_default_slots_for_equipment(equipment: Equipment) -> None:
         )
         return
 
-    if eq_type == Equipment.EquipmentType.PEGBOARD:
+    if eq_type in (Equipment.EquipmentType.HANGER, "hanger", "pegboard"):
         rows = max(rows, 1)
-        for r in range(rows):
-            for c in range(5):
-                EquipmentSlot.objects.create(
-                    equipment=equipment,
-                    row_index=r,
-                    col_index=c,
-                    width_percent=20.0,
-                )
+        for r in range(min(rows, 2)):
+            EquipmentSlot.objects.create(
+                equipment=equipment,
+                row_index=r,
+                col_index=0,
+                width_percent=100.0,
+            )
         return
 
-    # display/прочее: как базовый вариант — 1x4
+    if eq_type in (Equipment.EquipmentType.MANNEQUIN, "mannequin", "display"):
+        EquipmentSlot.objects.create(
+            equipment=equipment,
+            row_index=0,
+            col_index=0,
+            width_percent=100.0,
+        )
+        return
+
     for c in range(4):
         EquipmentSlot.objects.create(
             equipment=equipment,

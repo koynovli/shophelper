@@ -1,10 +1,14 @@
+from decimal import Decimal
+
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Min, Sum
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
+    Category,
     ChatMessage,
+    Company,
     Equipment,
     EquipmentSlot,
     Inventory,
@@ -16,9 +20,11 @@ from .models import (
     StaffTask,
     StockItem,
     Store,
+    StoreMap,
     Supplier,
     SupplyOrder,
     SupplyOrderItem,
+    SupplyReceivingTask,
     User,
     Zone,
 )
@@ -37,6 +43,102 @@ class ProductBriefSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "sku")
 
 
+class CategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Category
+        fields = ("id", "name")
+
+
+class ProductListSerializer(serializers.ModelSerializer):
+    category = CategorySerializer(read_only=True)
+
+    class Meta:
+        model = Product
+        fields = (
+            "id",
+            "name",
+            "sku",
+            "gtin",
+            "category",
+            "price",
+            "width",
+            "height",
+            "depth",
+            "weight",
+            "is_marked",
+            "is_stackable",
+        )
+
+
+class ProductCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product
+        fields = (
+            "name",
+            "sku",
+            "gtin",
+            "category",
+            "price",
+            "width",
+            "height",
+            "depth",
+            "weight",
+            "is_marked",
+            "is_stackable",
+        )
+        extra_kwargs = {
+            "gtin": {"required": False, "allow_null": True, "allow_blank": True},
+            "is_marked": {"required": False},
+            "is_stackable": {"required": False},
+        }
+
+    def validate_sku(self, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("SKU обязателен.")
+        qs = Product.objects.filter(sku__iexact=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Товар с таким SKU уже существует.")
+        return value
+
+    def validate_gtin(self, value: str | None) -> str | None:
+        if value in (None, ""):
+            return None
+        value = str(value).strip()
+        if not value.isdigit() or len(value) > 14:
+            raise serializers.ValidationError("GTIN: до 14 цифр.")
+        qs = Product.objects.filter(gtin=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Товар с таким GTIN уже существует.")
+        return value
+
+    def validate_price(self, value) -> Decimal:
+        if value is None or Decimal(str(value)) < 0:
+            raise serializers.ValidationError("Цена не может быть отрицательной.")
+        return value
+
+    def _validate_positive(self, value: float, label: str) -> float:
+        if value is None or float(value) <= 0:
+            raise serializers.ValidationError(f"{label} должно быть больше 0.")
+        return float(value)
+
+    def validate_width(self, value: float) -> float:
+        return self._validate_positive(value, "Ширина")
+
+    def validate_height(self, value: float) -> float:
+        return self._validate_positive(value, "Высота")
+
+    def validate_depth(self, value: float) -> float:
+        return self._validate_positive(value, "Глубина")
+
+    def validate_weight(self, value: float) -> float:
+        return self._validate_positive(value, "Вес")
+
+
 class EquipmentBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipment
@@ -45,6 +147,8 @@ class EquipmentBriefSerializer(serializers.ModelSerializer):
 
 class EquipmentSlotSerializer(serializers.ModelSerializer):
     planogram = serializers.SerializerMethodField()
+    active_placement_task = serializers.SerializerMethodField()
+    nearest_batch_expiry = serializers.SerializerMethodField()
 
     class Meta:
         model = EquipmentSlot
@@ -56,7 +160,39 @@ class EquipmentSlotSerializer(serializers.ModelSerializer):
             "current_qty",
             "max_capacity",
             "planogram",
+            "active_placement_task",
+            "nearest_batch_expiry",
         )
+
+    def get_active_placement_task(self, obj: EquipmentSlot) -> bool:
+        return obj.planograms.filter(
+            placement_tasks__status__in=(
+                PlacementTask.Status.CREATED,
+                PlacementTask.Status.PENDING,
+                PlacementTask.Status.IN_PROGRESS,
+            ),
+        ).exists()
+
+    def get_nearest_batch_expiry(self, obj: EquipmentSlot):
+        planogram = obj.planograms.select_related("product").first()
+        if planogram is None:
+            return None
+        shelf = obj.shelf
+        if shelf is None:
+            shelf = Shelf.objects.filter(
+                equipment_id=obj.equipment_id,
+                level=obj.row_index + 1,
+            ).first()
+        if shelf is None:
+            return None
+        agg = Inventory.objects.filter(
+            product_id=planogram.product_id,
+            shelf_id=shelf.id,
+            status=Inventory.LocationStatus.SHELF,
+            batch__isnull=False,
+            batch__is_active=True,
+        ).aggregate(nearest=Min("batch__expiration_date"))
+        return agg.get("nearest")
 
     def get_planogram(self, obj: EquipmentSlot):
         planogram = obj.planograms.select_related("product").first()
@@ -371,6 +507,29 @@ class SupplierSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class SupplierCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Supplier
+        fields = ("name", "inn", "contact_info")
+        extra_kwargs = {"contact_info": {"required": False, "allow_blank": True}}
+
+    def validate_inn(self, value: str) -> str:
+        digits = "".join(c for c in value if c.isdigit())
+        if len(digits) not in (10, 12):
+            raise serializers.ValidationError(
+                "ИНН должен содержать 10 или 12 цифр."
+            )
+        if Supplier.objects.filter(inn=digits).exists():
+            raise serializers.ValidationError("Поставщик с таким ИНН уже зарегистрирован.")
+        return digits
+
+    def validate_name(self, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Укажите название поставщика.")
+        return name
+
+
 class ProductBatchSerializer(serializers.ModelSerializer):
     remaining_days = serializers.SerializerMethodField()
     is_expired = serializers.SerializerMethodField()
@@ -440,14 +599,256 @@ class ProductBatchSerializer(serializers.ModelSerializer):
         return batch
 
 
-class SupplyOrderItemSerializer(serializers.ModelSerializer):
+class SupplyOrderItemWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupplyOrderItem
-        fields = "__all__"
+        fields = ("product", "quantity", "purchase_price")
+
+    def validate_quantity(self, value: int) -> int:
+        if value < 1:
+            raise serializers.ValidationError("Количество должно быть не меньше 1.")
+        return value
+
+    def validate_purchase_price(self, value: Decimal) -> Decimal:
+        if value < 0:
+            raise serializers.ValidationError("Цена закупки не может быть отрицательной.")
+        return value
+
+
+class SupplyOrderItemReadSerializer(serializers.ModelSerializer):
+    product_detail = ProductBriefSerializer(source="product", read_only=True)
+
+    class Meta:
+        model = SupplyOrderItem
+        fields = (
+            "id",
+            "product",
+            "product_detail",
+            "quantity",
+            "actual_quantity",
+            "purchase_price",
+            "discrepancy_note",
+        )
+
+
+class ReceivingTaskBriefSerializer(serializers.ModelSerializer):
+    assigned_to_username = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupplyReceivingTask
+        fields = (
+            "id",
+            "status",
+            "assigned_to",
+            "assigned_to_username",
+            "created_at",
+            "completed_at",
+        )
+
+    def get_assigned_to_username(self, obj: SupplyReceivingTask) -> str | None:
+        if obj.assigned_to_id is None:
+            return None
+        return obj.assigned_to.username
+
+
+class SupplyOrderListSerializer(serializers.ModelSerializer):
+    items = SupplyOrderItemReadSerializer(many=True, read_only=True)
+    supplier_detail = SupplierSerializer(source="supplier", read_only=True)
+    store_name = serializers.CharField(source="store.name", read_only=True)
+    created_by_username = serializers.SerializerMethodField()
+    receiving_task = ReceivingTaskBriefSerializer(read_only=True)
+
+    class Meta:
+        model = SupplyOrder
+        fields = (
+            "id",
+            "company",
+            "store",
+            "store_name",
+            "supplier",
+            "supplier_detail",
+            "status",
+            "created_at",
+            "received_at",
+            "total_amount",
+            "total_cost",
+            "has_discrepancies",
+            "planned_receiving_date",
+            "created_by",
+            "created_by_username",
+            "received_by",
+            "receiving_task",
+            "items",
+        )
+
+    def get_created_by_username(self, obj: SupplyOrder) -> str | None:
+        if obj.created_by_id is None:
+            return None
+        return obj.created_by.username
+
+
+class SupplyOrderCreateSerializer(serializers.ModelSerializer):
+    items = SupplyOrderItemWriteSerializer(many=True)
+    assigned_to = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(role=User.Role.EMPLOYEE),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+
+    class Meta:
+        model = SupplyOrder
+        fields = ("supplier", "status", "items", "assigned_to", "planned_receiving_date")
+
+    def validate_items(self, value: list) -> list:
+        if not value:
+            raise serializers.ValidationError("Добавьте хотя бы одну позицию в заказ.")
+        return value
+
+    def validate_status(self, value: str) -> str:
+        allowed = {
+            SupplyOrder.Status.DRAFT,
+            SupplyOrder.Status.ORDERED,
+        }
+        if value not in allowed:
+            raise serializers.ValidationError(
+                "При создании допустимы статусы: draft, ordered."
+            )
+        return value
+
+    def create(self, validated_data):
+        items_data = validated_data.pop("items")
+        assigned_to = validated_data.pop("assigned_to", None)
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request is not None else None
+
+        company = Company.objects.order_by("pk").first()
+        if company is None:
+            raise serializers.ValidationError(
+                {"detail": "Нет организации в системе. Создайте Company в админке."}
+            )
+
+        store = None
+        if user is not None:
+            store = getattr(user, "store", None)
+        if store is None:
+            store = Store.objects.order_by("pk").first()
+        if store is None:
+            raise serializers.ValidationError(
+                {"detail": "Нет магазина в системе. Создайте магазин или привяжите store к пользователю."}
+            )
+
+        total_amount = Decimal("0")
+        for row in items_data:
+            total_amount += Decimal(row["quantity"]) * row["purchase_price"]
+
+        with transaction.atomic():
+            order = SupplyOrder.objects.create(
+                company=company,
+                store=store,
+                supplier=validated_data.get("supplier"),
+                status=validated_data.get("status", SupplyOrder.Status.DRAFT),
+                total_amount=total_amount,
+                planned_receiving_date=validated_data.get("planned_receiving_date"),
+                created_by=user if user and user.is_authenticated else None,
+            )
+            for row in items_data:
+                SupplyOrderItem.objects.create(order=order, **row)
+
+        if order.status == SupplyOrder.Status.ORDERED:
+            from .supply_receiving_service import create_receiving_task
+
+            create_receiving_task(order, user, assigned_to=assigned_to)
+
+        return order
+
+
+class ReceivingCompleteLineSerializer(serializers.Serializer):
+    item_id = serializers.IntegerField()
+    expiration_date = serializers.DateField()
+    actual_quantity = serializers.IntegerField(min_value=0)
+    discrepancy_note = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        order_item = SupplyOrderItem.objects.filter(pk=attrs["item_id"]).first()
+        if order_item is None:
+            return attrs
+        actual = attrs["actual_quantity"]
+        if actual != order_item.quantity and not (attrs.get("discrepancy_note") or "").strip():
+            raise serializers.ValidationError(
+                {"discrepancy_note": "Обязательно при расхождении с заказанным количеством."}
+            )
+        return attrs
+
+
+class ReceivingCompleteSerializer(serializers.Serializer):
+    lines = ReceivingCompleteLineSerializer(many=True)
+
+
+class SupplyReceivingTaskReadSerializer(serializers.ModelSerializer):
+    supply_order = SupplyOrderListSerializer(read_only=True)
+    assigned_to_username = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupplyReceivingTask
+        fields = (
+            "id",
+            "status",
+            "supply_order",
+            "assigned_to",
+            "assigned_to_username",
+            "created_at",
+            "completed_at",
+        )
+
+    def get_assigned_to_username(self, obj: SupplyReceivingTask) -> str | None:
+        if obj.assigned_to_id is None:
+            return None
+        return obj.assigned_to.username
+
+
+class SupplyOrderUpdateSerializer(serializers.ModelSerializer):
+    items = SupplyOrderItemWriteSerializer(many=True)
+
+    class Meta:
+        model = SupplyOrder
+        fields = ("supplier", "items", "planned_receiving_date")
+
+    def validate_items(self, value: list) -> list:
+        if not value:
+            raise serializers.ValidationError("Добавьте хотя бы одну позицию в заказ.")
+        return value
+
+    def validate(self, attrs):
+        if self.instance.status != SupplyOrder.Status.DRAFT:
+            raise serializers.ValidationError(
+                {"detail": "Редактировать можно только заказ в статусе «Черновик»."}
+            )
+        return attrs
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop("items", None)
+        with transaction.atomic():
+            if "supplier" in validated_data:
+                instance.supplier = validated_data["supplier"]
+            if "planned_receiving_date" in validated_data:
+                instance.planned_receiving_date = validated_data["planned_receiving_date"]
+            if items_data is not None:
+                total_amount = Decimal("0")
+                for row in items_data:
+                    total_amount += Decimal(row["quantity"]) * row["purchase_price"]
+                instance.total_amount = total_amount
+                instance.items.all().delete()
+                for row in items_data:
+                    SupplyOrderItem.objects.create(order=instance, **row)
+            instance.save()
+        return instance
 
 
 class SupplyOrderSerializer(serializers.ModelSerializer):
-    items = SupplyOrderItemSerializer(many=True, read_only=True)
+    """Совместимость: полный ответ после receive и legacy."""
+
+    items = SupplyOrderItemReadSerializer(many=True, read_only=True)
     supplier_detail = SupplierSerializer(source="supplier", read_only=True)
 
     class Meta:
@@ -496,6 +897,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data["access"] = str(access)
         data["refresh"] = str(refresh)
         return data
+
+
+class StoreMapSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StoreMap
+        fields = ("id", "store", "width_m", "length_m")
 
 
 class ZoneSerializer(serializers.ModelSerializer):

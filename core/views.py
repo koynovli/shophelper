@@ -4,6 +4,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django_filters import rest_framework as filters
@@ -29,9 +30,13 @@ from .models import (
     Shelf,
     StaffTask,
     StockItem,
+    Supplier,
     SupplyOrder,
     SupplyOrderItem,
+    SupplyReceivingTask,
     User,
+    Store,
+    StoreMap,
     Zone,
 )
 from .permissions import IsRoleAdmin
@@ -47,6 +52,7 @@ from .expiry_writeoff import write_off_expired_shelf_stock
 from .placement_sync import adjust_slot_quantity
 from .product_tracking import resolve_store_id
 from .serializers import (
+    CategorySerializer,
     ChatMessageCreateSerializer,
     ChatMessageSerializer,
     EquipmentSerializer,
@@ -59,6 +65,8 @@ from .serializers import (
     PlacementTaskUpdateSerializer,
     ProductBatchSerializer,
     ProductBriefSerializer,
+    ProductCreateSerializer,
+    ProductListSerializer,
     ProductSerializer,
     ShelfSerializer,
     SlotQrVerifySerializer,
@@ -66,8 +74,22 @@ from .serializers import (
     StaffTaskReadSerializer,
     StaffTaskWriteSerializer,
     StockItemSerializer,
+    SupplierCreateSerializer,
+    SupplierSerializer,
+    ReceivingCompleteSerializer,
+    SupplyOrderCreateSerializer,
+    SupplyOrderListSerializer,
     SupplyOrderSerializer,
+    SupplyOrderUpdateSerializer,
+    SupplyReceivingTaskReadSerializer,
+    StoreMapSerializer,
     ZoneSerializer,
+)
+from .supply_receiving_service import (
+    SupplyReceivingError,
+    accept_receiving_task,
+    complete_receiving_task,
+    create_receiving_task,
 )
 from .staff_task_service import StaffTaskError, cancel_staff_task, create_staff_task
 from .staff_task_service import accept_staff_task as accept_staff_task_svc
@@ -190,130 +212,237 @@ class ProductBatchViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class SupplierViewSet(viewsets.ModelViewSet):
+    queryset = Supplier.objects.order_by("name")
+    serializer_class = SupplierSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return SupplierCreateSerializer
+        return SupplierSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        supplier = serializer.save()
+        out = SupplierSerializer(supplier, context=self.get_serializer_context())
+        headers = self.get_success_headers(out.data)
+        return Response(out.data, status=status.HTTP_201_CREATED, headers=headers)
+
+
 class SupplyOrderViewSet(viewsets.ModelViewSet):
-    queryset = SupplyOrder.objects.prefetch_related("items").select_related(
+    queryset = SupplyOrder.objects.prefetch_related(
+        "items__product",
+        "receiving_task__assigned_to",
+    ).select_related(
         "company",
         "store",
         "supplier",
         "created_by",
         "received_by",
     )
-    serializer_class = SupplyOrderSerializer
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return SupplyOrderCreateSerializer
+        if self.action in ("update", "partial_update"):
+            return SupplyOrderUpdateSerializer
+        if self.action in ("list", "retrieve", "submit"):
+            return SupplyOrderListSerializer
+        return SupplyOrderSerializer
+
+    def get_permissions(self):
+        if self.action in (
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "receive",
+            "submit",
+        ):
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = serializer.save()
+        out = SupplyOrderListSerializer(
+            order, context=self.get_serializer_context()
+        )
+        headers = self.get_success_headers(out.data)
+        return Response(out.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        order = serializer.save()
+        out = SupplyOrderListSerializer(
+            order, context=self.get_serializer_context()
+        )
+        return Response(out.data)
+
+    def perform_destroy(self, instance: SupplyOrder) -> None:
+        if instance.status != SupplyOrder.Status.DRAFT:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError(
+                {"detail": "Удалить можно только черновик заказа."}
+            )
+        instance.delete()
+
+    @action(detail=True, methods=["post"])
+    def submit(self, request, pk=None):
+        order = self.get_object()
+        if order.status != SupplyOrder.Status.DRAFT:
+            return Response(
+                {"detail": "Оформить можно только заказ в статусе «Черновик»."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not order.items.exists():
+            return Response(
+                {"detail": "Добавьте позиции в заказ перед оформлением."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        update_fields = ["status"]
+        planned_raw = request.data.get("planned_receiving_date")
+        if planned_raw is not None:
+            if planned_raw == "":
+                order.planned_receiving_date = None
+            else:
+                from django.utils.dateparse import parse_date
+
+                parsed = parse_date(str(planned_raw))
+                if parsed is None:
+                    return Response(
+                        {"planned_receiving_date": "Ожидается дата YYYY-MM-DD."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                order.planned_receiving_date = parsed
+            update_fields.append("planned_receiving_date")
+
+        order.status = SupplyOrder.Status.ORDERED
+        order.save(update_fields=update_fields)
+
+        assigned_to = None
+        assigned_raw = request.data.get("assigned_to")
+        if assigned_raw is not None:
+            try:
+                assigned_to = User.objects.get(
+                    pk=int(assigned_raw),
+                    role=User.Role.EMPLOYEE,
+                )
+            except (User.DoesNotExist, TypeError, ValueError):
+                return Response(
+                    {"assigned_to": "Укажите id сотрудника с ролью employee."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        try:
+            create_receiving_task(order, request.user, assigned_to=assigned_to)
+        except SupplyReceivingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = self.get_object()
+        serializer = SupplyOrderListSerializer(
+            order, context=self.get_serializer_context()
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
-        self.get_object()
-        batches_payload = request.data.get("batches")
-        if not isinstance(batches_payload, list) or len(batches_payload) == 0:
-            return Response(
-                {
-                    "detail": "Ожидается непустой массив batches: "
-                    '[{"item_id": ..., "expiration_date": "YYYY-MM-DD", '
-                    '"actual_quantity": <опционально>}, ...].'
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        return Response(
+            {
+                "detail": "Приёмка выполняется сотрудником через задачу приёмки "
+                "(PWA → задача «Приёмка»)."
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
+
+class SupplyReceivingTaskViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = SupplyReceivingTask.objects.select_related(
+        "supply_order",
+        "supply_order__supplier",
+        "supply_order__store",
+        "assigned_to",
+    ).prefetch_related(
+        "supply_order__items__product",
+        "supply_order__receiving_task__assigned_to",
+    )
+    serializer_class = SupplyReceivingTaskReadSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if getattr(user, "role", None) == User.Role.EMPLOYEE:
+            qs = qs.filter(
+                status__in=(
+                    SupplyReceivingTask.Status.CREATED,
+                    SupplyReceivingTask.Status.IN_PROGRESS,
+                )
+            ).filter(Q(assigned_to_id=user.pk) | Q(assigned_to__isnull=True))
+        return qs
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
         try:
-            with transaction.atomic():
-                order = SupplyOrder.objects.select_for_update().get(pk=self.kwargs["pk"])
-                if order.status == SupplyOrder.Status.RECEIVED:
-                    return Response(
-                        {"detail": "Заказ уже принят."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+            task = accept_receiving_task(int(pk), request.user)
+        except SupplyReceivingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            SupplyReceivingTaskReadSerializer(task).data,
+            status=status.HTTP_200_OK,
+        )
 
-                total_cost = Decimal("0")
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        serializer = ReceivingCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lines = [
+            {
+                "item_id": row["item_id"],
+                "expiration_date": row["expiration_date"],
+                "actual_quantity": row["actual_quantity"],
+                "discrepancy_note": row.get("discrepancy_note", ""),
+            }
+            for row in serializer.validated_data["lines"]
+        ]
+        try:
+            task = complete_receiving_task(int(pk), request.user, lines)
+        except SupplyReceivingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        task = SupplyReceivingTask.objects.select_related(
+            "supply_order__supplier",
+            "supply_order__store",
+            "assigned_to",
+        ).prefetch_related("supply_order__items__product").get(pk=task.pk)
+        return Response(
+            SupplyReceivingTaskReadSerializer(task).data,
+            status=status.HTTP_200_OK,
+        )
 
-                for entry in batches_payload:
-                    if not isinstance(entry, dict):
-                        raise ValueError("Каждый элемент batches должен быть объектом.")
-                    item_id = entry.get("item_id")
-                    exp_raw = entry.get("expiration_date")
-                    if item_id is None or exp_raw is None:
-                        raise ValueError(
-                            "Для каждой партии нужны поля item_id и expiration_date."
-                        )
-                    exp_date = _parse_expiration_date(exp_raw)
-                    if exp_date is None:
-                        raise ValueError(
-                            "Некорректная дата expiration_date (ожидается YYYY-MM-DD)."
-                        )
 
-                    try:
-                        item = SupplyOrderItem.objects.select_for_update().get(
-                            pk=item_id,
-                            order=order,
-                        )
-                    except SupplyOrderItem.DoesNotExist as exc:
-                        raise ValueError(
-                            f"Позиция заказа id={item_id} не найдена или не относится "
-                            "к этому заказу."
-                        ) from exc
+class EmployeeListView(APIView):
+    """Список сотрудников для назначения задачи приёмки."""
 
-                    raw_actual = entry.get("actual_quantity", None)
-                    if raw_actual is None:
-                        actual_qty = item.quantity
-                    else:
-                        try:
-                            actual_qty = int(raw_actual)
-                        except (TypeError, ValueError) as exc:
-                            raise ValueError(
-                                "Поле actual_quantity должно быть целым числом."
-                            ) from exc
-                    if actual_qty < 0:
-                        raise ValueError("actual_quantity не может быть отрицательным.")
+    permission_classes = [IsAuthenticated, IsRoleAdmin]
 
-                    item.actual_quantity = actual_qty
-                    item.save(update_fields=["actual_quantity"])
-
-                    line_cost = Decimal(actual_qty) * item.purchase_price
-                    total_cost += line_cost
-
-                    if actual_qty == 0:
-                        continue
-
-                    batch = ProductBatch.objects.create(
-                        product=item.product,
-                        store=order.store,
-                        supply_item=item,
-                        purchase_price=item.purchase_price,
-                        initial_quantity=actual_qty,
-                        current_quantity=actual_qty,
-                        manufacture_date=None,
-                        expiration_date=exp_date,
-                        is_active=True,
-                    )
-                    Inventory.objects.update_or_create(
-                        store=order.store,
-                        product=item.product,
-                        batch=batch,
-                        defaults={
-                            "quantity": actual_qty,
-                            "status": Inventory.LocationStatus.WAREHOUSE,
-                        },
-                    )
-
-                order.status = SupplyOrder.Status.RECEIVED
-                order.received_at = timezone.now()
-                order.total_cost = total_cost
-                order.received_by = (
-                    request.user if request.user.is_authenticated else None
-                )
-                order.save(
-                    update_fields=[
-                        "status",
-                        "received_at",
-                        "total_cost",
-                        "received_by",
-                    ]
-                )
-        except ValueError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-        order = self.get_object()
-        serializer = self.get_serializer(order)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+    def get(self, request):
+        rows = User.objects.filter(role=User.Role.EMPLOYEE).order_by("username")
+        return Response(
+            [{"id": u.pk, "username": u.username} for u in rows],
+            status=status.HTTP_200_OK,
+        )
 
 
 def _parse_expiration_date(raw):
@@ -338,9 +467,37 @@ class EquipmentFilter(filters.FilterSet):
         fields = ("zone_id",)
 
 
+class StoreMapView(APIView):
+    """Границы 2D-карты зала для текущего магазина пользователя."""
+
+    def get(self, request):
+        store_id = getattr(request.user, "store_id", None)
+        floor_map = None
+        if store_id:
+            floor_map = StoreMap.objects.filter(store_id=store_id).first()
+        if floor_map is None:
+            floor_map = StoreMap.objects.select_related("store").first()
+        if floor_map is None:
+            store = Store.objects.first()
+            if store is None:
+                return Response(
+                    {"detail": "Магазин не настроен."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            floor_map, _ = StoreMap.objects.get_or_create(
+                store=store,
+                defaults={"width_m": 20.0, "length_m": 15.0},
+            )
+        return Response(StoreMapSerializer(floor_map).data)
+
+
 class ZoneViewSet(viewsets.ModelViewSet):
     queryset = Zone.objects.select_related("store").prefetch_related(
         "equipment__shelves",
+        "equipment__slots",
+        "equipment__slots__planograms",
+        "equipment__slots__planograms__product",
+        "equipment__slots__planograms__placement_tasks",
     )
     serializer_class = ZoneSerializer
     filterset_class = ZoneFilter
@@ -487,11 +644,54 @@ class InventoryViewSet(viewsets.ModelViewSet):
         )
 
 
-class ProductViewSet(viewsets.ReadOnlyModelViewSet):
-    """Список товаров (планограмма, мерчандайзинг); create-test — только админ."""
+class CategoryViewSet(viewsets.ModelViewSet):
+    """Категории номенклатуры: список для всех, создание — админ."""
+
+    queryset = Category.objects.order_by("name")
+    serializer_class = CategorySerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+
+class ProductViewSet(viewsets.ModelViewSet):
+    """Номенклатура: каталог (read) и регистрация/правка (admin)."""
 
     queryset = Product.objects.select_related("category").order_by("name")
-    serializer_class = ProductBriefSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action in ("list", "retrieve"):
+            return ProductListSerializer
+        if self.action in ("create", "update", "partial_update"):
+            return ProductCreateSerializer
+        return ProductBriefSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy", "create_test"):
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+    def perform_destroy(self, instance: Product) -> None:
+        blockers: list[str] = []
+        if Planogram.objects.filter(product=instance).exists():
+            blockers.append("планограммы")
+        if ProductBatch.objects.filter(product=instance).exists():
+            blockers.append("партии")
+        if PlacementTask.objects.filter(product=instance).exists():
+            blockers.append("задачи выкладки")
+        if StockItem.objects.filter(product=instance, quantity__gt=0).exists():
+            blockers.append("остаток на складе")
+        if blockers:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError(
+                {"detail": f"Нельзя удалить: есть связанные {', '.join(blockers)}."}
+            )
+        instance.delete()
 
     @action(detail=False, methods=["post"], url_path="create-test")
     def create_test(self, request):

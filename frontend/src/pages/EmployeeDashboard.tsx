@@ -9,6 +9,7 @@ import { poolStatusLabel, taskTypeLabel } from '../api/taskPool';
 import { useAuth } from '../auth/AuthContext';
 import { PlacementTaskWizard } from '../components/PlacementTaskWizard';
 import { StaffTaskWizard } from '../components/StaffTaskWizard';
+import { SupplyReceivingWizard } from '../components/SupplyReceivingWizard';
 import { useStoreNotifications } from '../hooks/useStoreNotifications';
 import { useTaskPoolWebSocket } from '../hooks/useTaskPoolWebSocket';
 
@@ -97,7 +98,7 @@ export function EmployeeDashboard(): React.ReactElement {
           <div>
             <h1 className="text-lg font-semibold leading-tight sm:text-xl">Мои задачи</h1>
             <p className="text-xs text-slate-400 sm:text-sm">
-              Выкладка и поручения менеджера в одном списке
+              Выкладка, приёмка заказов и поручения менеджера
             </p>
           </div>
         </div>
@@ -137,7 +138,9 @@ export function EmployeeDashboard(): React.ReactElement {
                       className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
                         t.task_type === 'placement'
                           ? 'bg-emerald-900/50 text-emerald-200'
-                          : 'bg-violet-900/50 text-violet-200'
+                          : t.task_type === 'receiving'
+                            ? 'bg-sky-900/50 text-sky-200'
+                            : 'bg-violet-900/50 text-violet-200'
                       }`}
                     >
                       {taskTypeLabel(t.task_type)}
@@ -149,6 +152,14 @@ export function EmployeeDashboard(): React.ReactElement {
                   <h2 className="text-base font-semibold leading-snug text-slate-50 sm:text-lg">
                     {t.title}
                   </h2>
+                  {t.task_type === 'receiving' && t.planned_receiving_date ? (
+                    <p className="mt-1 text-xs text-sky-300">
+                      Плановая приёмка:{' '}
+                      {new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(
+                        new Date(t.planned_receiving_date),
+                      )}
+                    </p>
+                  ) : null}
                   {t.destination ? (
                     <p className="mt-2 text-sm text-slate-300">{t.destination}</p>
                   ) : null}
@@ -157,6 +168,9 @@ export function EmployeeDashboard(): React.ReactElement {
                   ) : null}
                   {selectedTaskId === t.id && t.task_type === 'staff' ? (
                     <StaffTaskWizard task={t} onDone={() => void loadPending()} />
+                  ) : null}
+                  {selectedTaskId === t.id && t.task_type === 'receiving' ? (
+                    <SupplyReceivingWizard task={t} onDone={() => void loadPending()} />
                   ) : null}
                 </article>
               </li>

@@ -35,7 +35,7 @@ class ContourCTaskTests(TestCase):
         self.equipment = Equipment.objects.create(
             name="Rack A",
             zone=self.zone,
-            type=Equipment.EquipmentType.SHELVING,
+            type=Equipment.EquipmentType.SHELF,
             pos_x=0,
             pos_y=0,
             width=100,

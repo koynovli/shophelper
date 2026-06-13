@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.db.models import Q
 
-from .models import PlacementTask, StaffTask, User
+from .models import PlacementTask, StaffTask, SupplyReceivingTask, User
 
 
 def _placement_title(task: PlacementTask) -> str:
@@ -75,19 +75,61 @@ def _staff_to_dto(task: StaffTask) -> dict:
     }
 
 
-def _normalize_status_filter(status: str | None) -> tuple[str | None, str | None]:
-    """Маппинг общего фильтра UI на статусы placement/staff."""
+def _receiving_to_dto(task: SupplyReceivingTask) -> dict:
+    order = task.supply_order
+    assigned = None
+    if task.assigned_to_id:
+        assigned = {
+            "id": task.assigned_to_id,
+            "username": task.assigned_to.username,
+        }
+    supplier_name = order.supplier.name if order.supplier_id else None
+    planned = None
+    if order.planned_receiving_date:
+        planned = order.planned_receiving_date.isoformat()
+    return {
+        "task_type": "receiving",
+        "id": str(task.pk),
+        "title": f"Приёмка заказа #{order.pk}",
+        "status": task.status,
+        "assigned_to": assigned,
+        "supply_order_id": order.pk,
+        "supplier_name": supplier_name,
+        "items_count": order.items.count(),
+        "planned_receiving_date": planned,
+        "created_at": task.created_at.isoformat(),
+    }
+
+
+def _normalize_status_filter(status: str | None) -> tuple[str | None, str | None, str | None]:
+    """Маппинг общего фильтра UI на статусы placement/staff/receiving."""
     if not status or status == "ALL":
-        return None, None
+        return None, None, None
     if status in ("PENDING", "CREATED"):
-        return PlacementTask.Status.CREATED, StaffTask.Status.CREATED
+        return (
+            PlacementTask.Status.CREATED,
+            StaffTask.Status.CREATED,
+            SupplyReceivingTask.Status.CREATED,
+        )
     if status == "IN_PROGRESS":
-        return PlacementTask.Status.IN_PROGRESS, StaffTask.Status.IN_PROGRESS
+        return (
+            PlacementTask.Status.IN_PROGRESS,
+            StaffTask.Status.IN_PROGRESS,
+            SupplyReceivingTask.Status.IN_PROGRESS,
+        )
     if status == "COMPLETED":
-        return PlacementTask.Status.COMPLETED, StaffTask.Status.COMPLETED
+        return (
+            PlacementTask.Status.COMPLETED,
+            StaffTask.Status.COMPLETED,
+            SupplyReceivingTask.Status.COMPLETED,
+        )
     if status == "CANCELLED":
-        return PlacementTask.Status.CANCELLED, StaffTask.Status.CANCELLED
-    return status, status
+        return (
+            PlacementTask.Status.CANCELLED,
+            StaffTask.Status.CANCELLED,
+            SupplyReceivingTask.Status.CANCELLED,
+        )
+    return status, status, status
 
 
 def fetch_task_pool(
@@ -99,10 +141,11 @@ def fetch_task_pool(
 ) -> list[dict]:
     """Объединённый список задач для UI управляющего и сотрудника."""
     items: list[dict] = []
-    placement_status, staff_status = _normalize_status_filter(status)
+    placement_status, staff_status, receiving_status = _normalize_status_filter(status)
 
     include_placement = task_type in (None, "placement", "all")
     include_staff = task_type in (None, "staff", "all")
+    include_receiving = task_type in (None, "receiving", "all")
 
     if include_placement:
         pt_qs = PlacementTask.objects.select_related(
@@ -150,6 +193,28 @@ def fetch_task_pool(
                 ),
             )
         items.extend(_staff_to_dto(t) for t in st_qs)
+
+    if include_receiving:
+        rt_qs = SupplyReceivingTask.objects.select_related(
+            "supply_order",
+            "supply_order__supplier",
+            "assigned_to",
+        ).prefetch_related("supply_order__items")
+        if receiving_status:
+            rt_qs = rt_qs.filter(status=receiving_status)
+        if assigned_to_id is not None:
+            rt_qs = rt_qs.filter(
+                Q(assigned_to_id=assigned_to_id) | Q(assigned_to__isnull=True)
+            )
+        elif user and getattr(user, "role", None) == User.Role.EMPLOYEE:
+            rt_qs = rt_qs.filter(
+                Q(assigned_to_id=user.pk) | Q(assigned_to__isnull=True),
+                status__in=(
+                    SupplyReceivingTask.Status.CREATED,
+                    SupplyReceivingTask.Status.IN_PROGRESS,
+                ),
+            )
+        items.extend(_receiving_to_dto(t) for t in rt_qs)
 
     items.sort(key=lambda x: x["created_at"], reverse=True)
     return items

@@ -22,12 +22,18 @@ from .models import (
     StaffTask,
     StockItem,
     Store,
+    StoreMap,
     Supplier,
     SupplyOrder,
     SupplyOrderItem,
     User,
     Zone,
 )
+
+
+@admin.register(StoreMap)
+class StoreMapAdmin(admin.ModelAdmin):
+    list_display = ("store", "width_m", "length_m")
 
 
 @admin.register(Store)

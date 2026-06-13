@@ -32,7 +32,7 @@ import type {
   FloorEquipmentType,
   FloorZone,
 } from '../types/floorPlan';
-import { normalizeFloorEquipment, slotFillMetrics } from '../types/floorPlan';
+import { normalizeFloorEquipment } from '../types/floorPlan';
 import {
   magneticSnapTopLeftPx,
   obbIntersectPx,
@@ -40,6 +40,9 @@ import {
   snapRotationDeg,
   SNAP_GRID_PX,
 } from '../utils/floorPlanGeometry';
+import { useStoreNotifications } from '../hooks/useStoreNotifications';
+import { EquipmentDetailPanel } from './map/EquipmentDetailPanel';
+import { MapEquipmentMerchItem } from './map/MapEquipmentMerchItem';
 import { MapEquipmentItem } from './MapEquipmentItem';
 
 /** Пикселей на 1 см координат из БД (10 px = 1 см на карте) */
@@ -52,25 +55,36 @@ type EditorMode = 'SELECT' | 'CREATE' | 'DUPLICATE';
 type EquipmentModalMode = 'create' | 'edit';
 
 const EQUIPMENT_TYPE_LABEL_RU: Record<FloorEquipmentType, string> = {
-  shelving: 'Стеллаж',
-  pegboard: 'Перфорированная панель',
+  shelf: 'Стеллаж',
+  hanger: 'Вешалка',
   fridge: 'Холодильник',
-  pallet: 'Паллета',
-  display: 'Витрина',
+  box: 'Бокс',
+  mannequin: 'Манекен',
 };
 
 function normalizeEquipmentTypeValue(type: string): FloorEquipmentType {
-  return type === 'shelf' ? 'shelving' : (type as FloorEquipmentType);
+  const map: Record<string, FloorEquipmentType> = {
+    shelving: 'shelf',
+    shelf: 'shelf',
+    pegboard: 'hanger',
+    hanger: 'hanger',
+    fridge: 'fridge',
+    pallet: 'box',
+    box: 'box',
+    display: 'mannequin',
+    mannequin: 'mannequin',
+  };
+  return map[type] ?? 'shelf';
 }
 
 function defaultRowsCountForType(type: FloorEquipmentType): number {
-  if (type === 'pallet') {
+  if (type === 'box' || type === 'mannequin') {
     return 1;
   }
-  if (type === 'pegboard') {
-    return 3;
+  if (type === 'hanger') {
+    return 2;
   }
-  if (type === 'shelving' || type === 'fridge') {
+  if (type === 'shelf' || type === 'fridge') {
     return 4;
   }
   return 1;
@@ -102,6 +116,7 @@ type MerchTaskRow = {
   status: string;
   product: { id: number; name: string; sku: string };
   equipment: { id: number; name: string };
+  slot_info?: { id: number; row_index: number; col_index: number } | null;
 };
 
 type WheelConfig = {
@@ -189,7 +204,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
     widthCm: 120,
     lengthCm: 60,
     rotation: 0,
-    type: 'shelving' as FloorEquipmentType,
+    type: 'shelf' as FloorEquipmentType,
     rowsCount: 4,
   });
   const [isSaving, setIsSaving] = useState(false);
@@ -209,6 +224,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
   } | null>(null);
   const [minScale, setMinScale] = useState(0.05);
   const [pendingTaskEquipmentIds, setPendingTaskEquipmentIds] = useState<Set<number>>(new Set());
+  const [pendingSlotIds, setPendingSlotIds] = useState<Set<number>>(new Set());
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const mapBoardRef = useRef<HTMLDivElement>(null);
@@ -273,22 +289,80 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       }
     };
 
+    const fetchMapSize = async (): Promise<void> => {
+      try {
+        const { data } = await api.get<{ width_m: number; length_m: number }>('/store-map/');
+        setDimensions({
+          width: Number(data.width_m) || 20,
+          height: Number(data.length_m) || 15,
+        });
+      } catch {
+        setDimensions({ width: 20, height: 15 });
+      }
+    };
+    void fetchMapSize();
     fetchZones();
   }, []);
 
   const loadPendingTaskEquipmentIds = useCallback(async (): Promise<void> => {
     if (isEditMode) {
       setPendingTaskEquipmentIds(new Set());
+      setPendingSlotIds(new Set());
       return;
     }
     try {
-      const response = await api.get('/placement-tasks/', { params: { status: 'CREATED' } });
-      const rows = extractApiList<MerchTaskRow>(response.data);
-      setPendingTaskEquipmentIds(new Set(rows.map((row) => row.equipment.id)));
+      const statuses = ['CREATED', 'PENDING', 'IN_PROGRESS'] as const;
+      const responses = await Promise.all(
+        statuses.map((st) =>
+          api.get('/placement-tasks/', { params: { status: st } }),
+        ),
+      );
+      const rows = responses.flatMap((r) => extractApiList<MerchTaskRow>(r.data));
+      const eqIds = new Set<number>();
+      const slotIds = new Set<number>();
+      for (const row of rows) {
+        eqIds.add(row.equipment.id);
+        if (row.slot_info?.id) {
+          slotIds.add(row.slot_info.id);
+        }
+      }
+      setPendingTaskEquipmentIds(eqIds);
+      setPendingSlotIds(slotIds);
     } catch {
       setPendingTaskEquipmentIds(new Set());
+      setPendingSlotIds(new Set());
     }
   }, [isEditMode]);
+
+  useStoreNotifications((ev) => {
+    if (
+      !ev.event.startsWith('placement_task') &&
+      ev.event !== 'inventory.updated' &&
+      ev.event !== 'slot.updated'
+    ) {
+      return;
+    }
+    void loadPendingTaskEquipmentIds();
+    void (async () => {
+      try {
+        const response = await api.get('/zones/');
+        const payload = Array.isArray(response.data)
+          ? response.data
+          : response.data.results ?? [];
+        const normalized = (payload as Record<string, unknown>[]).map((z) => ({
+          ...z,
+          equipment: Array.isArray(z.equipment)
+            ? (z.equipment as Record<string, unknown>[]).map((eq) =>
+                normalizeFloorEquipment(eq),
+              )
+            : [],
+        })) as FloorZone[];
+        setZones(normalized);
+      } catch {
+        /* ignore */
+      }
+    })();
+  });
 
   useEffect(() => {
     void loadPendingTaskEquipmentIds();
@@ -335,6 +409,20 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       ),
     [zones],
   );
+
+  const effectivePendingSlotIds = useMemo(() => {
+    const ids = new Set(pendingSlotIds);
+    for (const zone of zones) {
+      for (const eq of zone.equipment) {
+        for (const slot of eq.slots ?? []) {
+          if (slot.active_placement_task) {
+            ids.add(slot.id);
+          }
+        }
+      }
+    }
+    return ids;
+  }, [pendingSlotIds, zones]);
 
   const equipmentLayoutsPx = useMemo(
     () =>
@@ -479,12 +567,12 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       selectEquipmentId(null);
       setNewObjCoords({ x: clamped.x, y: clamped.y });
       setNewEquipmentForm({
-        name: nextGlobalEquipmentName(zonesRef.current, 'shelving'),
+        name: nextGlobalEquipmentName(zonesRef.current, 'shelf'),
         widthCm: 120,
         lengthCm: 60,
         rotation: 0,
-        type: 'shelving',
-        rowsCount: defaultRowsCountForType('shelving'),
+        type: 'shelf',
+        rowsCount: defaultRowsCountForType('shelf'),
       });
       setIsModalOpen(true);
     },
@@ -661,8 +749,8 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       widthCm: 120,
       lengthCm: 60,
       rotation: 0,
-      type: 'shelving',
-      rowsCount: defaultRowsCountForType('shelving'),
+      type: 'shelf',
+      rowsCount: defaultRowsCountForType('shelf'),
     });
   };
 
@@ -1268,10 +1356,10 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
           <>
             <MapZoomToolbar />
             <TransformComponent
-              wrapperClass="!h-full !w-full"
-              wrapperStyle={{ width: '100%', height: '100%' }}
-              contentStyle={{ width: mapWidthPx, height: mapHeightPx }}
-              contentClass="!shadow-none"
+              wrapperClass="!h-full !w-full !bg-slate-900"
+              wrapperStyle={{ width: '100%', height: '100%', background: '#0f172a' }}
+              contentStyle={{ width: mapWidthPx, height: mapHeightPx, background: '#0f172a' }}
+              contentClass="!shadow-none !bg-slate-900"
             >
               <div
                 ref={mapBoardRef}
@@ -1281,6 +1369,8 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                 }`}
                 style={{
                   imageRendering: 'pixelated',
+                  minWidth: mapWidthPx,
+                  minHeight: mapHeightPx,
                   ...gridStyle,
                 }}
                 onClick={handleMapClick}
@@ -1288,42 +1378,67 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                 onPointerUp={handleMapPointerUp}
                 onPointerLeave={handleMapBoardPointerLeave}
               >
-                {zones.map((zone) =>
-                  zone.equipment.map((eq) => (
-                    <MapEquipmentItem
-                      key={eq.id}
-                      equipment={eq}
-                      zoneColorHex={zone.color}
-                      pxPerCm={PX_PER_CM}
-                      editMode={isSelectMode}
-                      layoutLocked={!isEditMode}
-                      selected={selectedEquipmentId === eq.id}
-                      dragging={draggingItem === eq.id}
-                      collision={collisionIds.has(eq.id)}
-                      hasPendingTask={pendingTaskEquipmentIds.has(eq.id)}
-                      onPointerDown={(ev) => {
-                        if (!isEditMode || !isSelectMode) {
-                          return;
-                        }
-                        ev.stopPropagation();
-                        pushUndoSnapshot();
-                        selectEquipmentId(eq.id);
-                        setDraggingItem(eq.id);
-                      }}
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        selectEquipmentId(eq.id);
-                      }}
-                      onDoubleClick={(ev) => {
-                        ev.stopPropagation();
-                        if (isEditMode) {
+                {isEditMode ? (
+                  zones.map((zone) =>
+                    zone.equipment.map((eq) => (
+                      <MapEquipmentItem
+                        key={eq.id}
+                        equipment={eq}
+                        zoneColorHex={zone.color}
+                        pxPerCm={PX_PER_CM}
+                        editMode={isSelectMode}
+                        layoutLocked={false}
+                        selected={selectedEquipmentId === eq.id}
+                        dragging={draggingItem === eq.id}
+                        collision={collisionIds.has(eq.id)}
+                        hasPendingTask={pendingTaskEquipmentIds.has(eq.id)}
+                        onPointerDown={(ev) => {
+                          if (!isSelectMode) {
+                            return;
+                          }
+                          ev.stopPropagation();
+                          pushUndoSnapshot();
+                          selectEquipmentId(eq.id);
+                          setDraggingItem(eq.id);
+                        }}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          selectEquipmentId(eq.id);
+                        }}
+                        onDoubleClick={(ev) => {
+                          ev.stopPropagation();
                           openEditModal(eq);
-                        } else {
-                          openMerchModal(eq);
-                        }
-                      }}
-                    />
-                  )),
+                        }}
+                      />
+                    )),
+                  )
+                ) : (
+                  zones.map((zone) =>
+                    zone.equipment.map((eq) => (
+                      <MapEquipmentMerchItem
+                        key={eq.id}
+                        equipment={eq}
+                        zoneColorHex={zone.color}
+                        pxPerCm={PX_PER_CM}
+                        pendingSlotIds={effectivePendingSlotIds}
+                        selected={selectedEquipmentId === eq.id}
+                        selectedSlotId={selectedSlotId}
+                        onEquipmentClick={(item) => {
+                          selectEquipmentId(item.id);
+                          openMerchModal(item);
+                        }}
+                        onSlotClick={(item, slot) => {
+                          selectEquipmentId(item.id);
+                          setMerchEquipmentId(item.id);
+                          setMerchEquipmentName(item.name);
+                          setMerchOpen(true);
+                          setSelectedSlotId(slot.id);
+                          void fetchMerchData(item.id);
+                        }}
+                        onDoubleClick={(item) => openMerchModal(item)}
+                      />
+                    )),
+                  )
                 )}
               </div>
             </TransformComponent>
@@ -1408,11 +1523,11 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                   }}
                   className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
                 >
-                  <option value="shelving">Стеллаж</option>
-                  <option value="pegboard">Перфорированная панель</option>
+                  <option value="shelf">Стеллаж</option>
+                  <option value="hanger">Вешалка</option>
                   <option value="fridge">Холодильник</option>
-                  <option value="pallet">Паллета</option>
-                  <option value="display">Витрина</option>
+                  <option value="box">Бокс / корзина</option>
+                  <option value="mannequin">Манекен</option>
                 </select>
               </label>
 
@@ -1530,248 +1645,34 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
         </div>
       ) : null}
 
-      {merchOpen && merchEquipmentId ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 backdrop-blur-sm p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
-            <h3 className="mb-1 text-lg font-semibold text-slate-100">Планограмма и задачи</h3>
-            <p className="mb-4 text-sm text-slate-400">{merchEquipmentName}</p>
-
-            {merchFeedback ? (
-              <p
-                className={`mb-3 rounded-md border px-3 py-2 text-xs ${
-                  merchFeedback.type === 'ok'
-                    ? 'border-emerald-600/50 bg-emerald-950/40 text-emerald-100'
-                    : 'border-amber-600/50 bg-amber-950/30 text-amber-100'
-                }`}
-              >
-                {merchFeedback.text}
-              </p>
-            ) : null}
-
-            <div className="mb-6 border-b border-slate-600 pb-5">
-              <h4 className="mb-2 text-sm font-semibold text-slate-200">Матрица слотов</h4>
-              {merchLoading ? (
-                <p className="text-xs text-slate-500">Загрузка…</p>
-              ) : !merchEquipment ? (
-                <p className="text-xs text-slate-500">Оборудование не найдено.</p>
-              ) : (
-                <div className="space-y-2">
-                  {Array.from({ length: Math.max(1, merchEquipment.rows_count || 1) }).map((_, rowIndex) => {
-                    const rowSlots = merchSlotsSorted.filter((s) => s.row_index === rowIndex);
-                    return (
-                      <div key={rowIndex} className="rounded-lg border border-slate-700 bg-slate-900/50 p-2">
-                        <p className="mb-2 text-[11px] uppercase tracking-wide text-slate-500">
-                          Ряд {rowIndex}
-                        </p>
-                        <div className="flex min-h-[72px] gap-2">
-                          {rowSlots.map((slot) => {
-                            const isActive = slot.id === selectedSlotId;
-                            const hasPlanogram = Boolean(slot.planogram);
-                            const replStatus = slot.planogram?.replenishment_status;
-                            const fill = slotFillMetrics(slot);
-                            const statusClass =
-                              fill.below30 || replStatus === 'DEFICIT'
-                                ? 'border-rose-500/70 bg-rose-900/30 text-rose-100'
-                                : replStatus === 'IN_PROGRESS'
-                                  ? 'border-amber-500/70 bg-amber-900/25 text-amber-100'
-                                  : hasPlanogram
-                                    ? 'border-emerald-600/60 bg-emerald-900/25 text-emerald-100'
-                                    : 'border-slate-600 bg-slate-800/70 text-slate-300';
-                            return (
-                              <button
-                                key={slot.id}
-                                type="button"
-                                onClick={() => setSelectedSlotId(slot.id)}
-                                style={{ width: `${slot.width_percent}%` }}
-                                className={`min-h-[72px] rounded-md border px-2 py-2 text-left text-xs transition ${statusClass} ${
-                                  isActive ? 'ring-2 ring-indigo-400/80' : 'hover:border-slate-500'
-                                }`}
-                              >
-                                {slot.planogram ? (
-                                  <>
-                                    <div className="font-semibold">{slot.planogram.product.name}</div>
-                                    <div className="mt-1 text-[11px] font-medium text-sky-100">
-                                      На полке: {fill.current} / {fill.cap || '—'} шт.
-                                      {fill.percent !== null ? ` (${fill.percent}%)` : ''}
-                                    </div>
-                                    <div className="mt-1 text-[11px] text-emerald-200/90">
-                                      Цель планограммы: {slot.planogram.target_quantity} шт.
-                                    </div>
-                                    {fill.below30 ? (
-                                      <div className="mt-1 text-[10px] text-rose-100">
-                                        &lt; 30% — нужна выкладка
-                                      </div>
-                                    ) : null}
-                                    {replStatus === 'IN_PROGRESS' ? (
-                                      <div className="mt-1 text-[10px] text-amber-100">
-                                        В процессе пополнения
-                                      </div>
-                                    ) : null}
-                                  </>
-                                ) : (
-                                  <span className="text-slate-400">+ Добавить товар</span>
-                                )}
-                              </button>
-                            );
-                          })}
-                          {rowSlots.length === 0 ? (
-                            <div className="flex min-h-[72px] w-full items-center rounded-md border border-dashed border-slate-700 px-2 text-xs text-slate-500">
-                              Нет слотов в этом ряду
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div className="mt-4 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
-                <h5 className="text-sm font-semibold text-slate-200">
-                  {selectedSlot
-                    ? `Редактирование слота: ряд ${selectedSlot.row_index}, ячейка ${selectedSlot.col_index}`
-                    : 'Выберите слот для редактирования'}
-                </h5>
-                <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-                  <label className="min-w-0 flex-1 text-sm text-slate-300">
-                    Товар
-                    <select
-                      value={merchProductId}
-                      onChange={(ev) => setMerchProductId(ev.target.value)}
-                      disabled={merchLoading || merchProducts.length === 0 || !selectedSlot}
-                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
-                    >
-                      {merchProducts.length === 0 ? (
-                        <option value="">Нет товаров</option>
-                      ) : (
-                        merchProducts.map((p) => (
-                          <option key={p.id} value={String(p.id)}>
-                            {p.name} ({p.sku})
-                          </option>
-                        ))
-                      )}
-                    </select>
-                  </label>
-                  <label className="w-full text-sm text-slate-300 sm:w-28">
-                    Цель, шт.
-                    <input
-                      type="number"
-                      min={1}
-                      value={merchTargetQty}
-                      onChange={(ev) =>
-                        setMerchTargetQty(Math.max(1, Number(ev.target.value) || 1))
-                      }
-                      disabled={!selectedSlot}
-                      className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500 disabled:opacity-50"
-                    />
-                  </label>
-                </div>
-                {selectedSlot?.planogram ? (
-                  <div className="mt-3 space-y-2">
-                    {(() => {
-                      const fill = slotFillMetrics(selectedSlot);
-                      const barWidth =
-                        fill.percent !== null ? `${fill.percent}%` : '0%';
-                      return (
-                        <>
-                          <div className="flex justify-between text-xs text-slate-400">
-                            <span>Заполнение слота</span>
-                            <span>
-                              {fill.current} / {fill.cap || '—'} шт.
-                            </span>
-                          </div>
-                          <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                            <div
-                              className={`h-full transition-all ${
-                                fill.below30 ? 'bg-rose-500' : 'bg-emerald-500'
-                              }`}
-                              style={{ width: barWidth }}
-                            />
-                          </div>
-                          <p className="text-[11px] text-slate-500">
-                            При остатке &lt; 30% от вместимости система создаёт задачу выкладки
-                            (CREATED).
-                          </p>
-                        </>
-                      );
-                    })()}
-                  </div>
-                ) : null}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={merchSaving || merchLoading || !merchProductId || !selectedSlot}
-                    onClick={() => void handleAddPlanogram()}
-                    className="rounded-md border border-emerald-500/70 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                  >
-                    Сохранить
-                  </button>
-                  <button
-                    type="button"
-                    disabled={merchSaving || !selectedSlot?.planogram}
-                    onClick={() => void handleSimulateSale()}
-                    className="rounded-md border border-amber-500/70 bg-amber-900/40 px-4 py-2 text-sm font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-50"
-                  >
-                    Симулировать продажу (−1)
-                  </button>
-                  <button
-                    type="button"
-                    disabled={merchSaving || !selectedSlot?.planogram}
-                    onClick={() => void handleDeletePlanogram()}
-                    className="rounded-md border border-rose-500/60 bg-rose-900/30 px-4 py-2 text-sm font-medium text-rose-100 hover:bg-rose-900/45 disabled:opacity-50"
-                  >
-                    Очистить слот
-                  </button>
-                  <button
-                    type="button"
-                    disabled={merchSaving}
-                    onClick={() => void handleMerchCreateTestProduct()}
-                    className="rounded-md border border-slate-500 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
-                  >
-                    Создать тестовый товар
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <h4 className="mb-2 text-sm font-semibold text-slate-200">Текущие задачи выкладки</h4>
-              {merchTasks.length === 0 ? (
-                <p className="text-xs text-slate-500">Нет активных задач (ожидает подвоз — не требуется).</p>
-              ) : (
-                <ul className="space-y-2">
-                  {merchTasks.map((t) => (
-                    <li
-                      key={t.id}
-                      className="rounded-lg border border-slate-600 bg-slate-900/50 px-3 py-2 text-sm text-slate-200"
-                    >
-                      Ожидается подвоз{' '}
-                      <span className="font-semibold text-amber-100">{t.quantity} шт.</span>{' '}
-                      <span className="text-slate-100">{t.product.name}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            <div className="mt-6 flex justify-end">
-              <button
-                type="button"
-                onClick={() => {
-                  setMerchOpen(false);
-                  setMerchEquipmentId(null);
-                  setSelectedSlotId(null);
-                  setMerchFeedback(null);
-                  void loadPendingTaskEquipmentIds();
-                }}
-                className="rounded-md border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-slate-300 hover:border-slate-500"
-              >
-                Закрыть
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <EquipmentDetailPanel
+        open={merchOpen && merchEquipmentId !== null}
+        equipment={merchEquipment}
+        equipmentName={merchEquipmentName}
+        slotsSorted={merchSlotsSorted}
+        selectedSlotId={selectedSlotId}
+        onSelectSlot={setSelectedSlotId}
+        onClose={() => {
+          setMerchOpen(false);
+          setMerchEquipmentId(null);
+          setSelectedSlotId(null);
+          setMerchFeedback(null);
+          void loadPendingTaskEquipmentIds();
+        }}
+        merchLoading={merchLoading}
+        merchSaving={merchSaving}
+        merchFeedback={merchFeedback}
+        merchTasks={merchTasks}
+        merchProducts={merchProducts}
+        merchProductId={merchProductId}
+        onMerchProductIdChange={setMerchProductId}
+        merchTargetQty={merchTargetQty}
+        onMerchTargetQtyChange={setMerchTargetQty}
+        onSavePlanogram={() => void handleAddPlanogram()}
+        onSimulateSale={() => void handleSimulateSale()}
+        onDeletePlanogram={() => void handleDeletePlanogram()}
+        onCreateTestProduct={() => void handleMerchCreateTestProduct()}
+      />
     </section>
   );
 }

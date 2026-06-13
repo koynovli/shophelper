@@ -13,6 +13,7 @@ from core.models import (
     Product,
     ProductBatch,
     Store,
+    Supplier,
     SupplyOrder,
     SupplyOrderItem,
 )
@@ -94,10 +95,17 @@ class Command(BaseCommand):
             is_marked=True,
         )
 
+        supplier = Supplier.objects.create(
+            name="Тестовый поставщик молока",
+            inn="7700000001",
+            contact_info="demo@supplier.local",
+        )
+
         unit_price = Decimal("72.50")
         order = SupplyOrder.objects.create(
             company=company,
             store=store,
+            supplier=supplier,
             status=SupplyOrder.Status.RECEIVED,
             received_at=timezone.now(),
             total_amount=Decimal("150") * unit_price,
