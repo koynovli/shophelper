@@ -43,17 +43,14 @@ class ExpiryWriteOffTests(TestCase):
             rows_count=1,
         )
         self.slot = self.equipment.slots.first()
-        self.shelf = Shelf.objects.create(
+        self.shelf, _ = Shelf.objects.get_or_create(
             equipment=self.equipment,
             level=1,
-            width=100,
-            height=40,
-            depth=50,
+            defaults={"width": 100, "height": 40, "depth": 50},
         )
         self.slot.shelf = self.shelf
         self.slot.max_capacity = 20
-        self.slot.current_qty = 5
-        self.slot.save()
+        self.slot.save(update_fields=["shelf", "max_capacity"])
         self.category = Category.objects.create(name="Food")
         self.product = Product.objects.create(
             name="Milk",
@@ -75,7 +72,7 @@ class ExpiryWriteOffTests(TestCase):
             store=self.store,
             initial_quantity=10,
             current_quantity=0,
-            expiration_date=date.today() - timedelta(days=1),
+            expiration_date=timezone.localdate() - timedelta(days=2),
             purchase_price="40.00",
         )
         self.fresh_batch = ProductBatch.objects.create(
@@ -83,7 +80,7 @@ class ExpiryWriteOffTests(TestCase):
             store=self.store,
             initial_quantity=20,
             current_quantity=20,
-            expiration_date=date.today() + timedelta(days=10),
+            expiration_date=timezone.localdate() + timedelta(days=10),
             purchase_price="40.00",
         )
         StockItem.objects.update_or_create(
@@ -96,6 +93,8 @@ class ExpiryWriteOffTests(TestCase):
             role=User.Role.ADMIN,
             store=self.store,
         )
+        self.slot.current_qty = 5
+        self.slot.save(update_fields=["current_qty"])
 
     def _completed_placement(self, batch: ProductBatch) -> PlacementTask:
         return PlacementTask.objects.create(

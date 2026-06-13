@@ -189,6 +189,12 @@ class Product(models.Model):
         verbose_name="Можно штабелировать",
         help_text="Если False — на полке только один ярус по высоте.",
     )
+    allowed_equipment_types = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="Допустимые типы оборудования",
+        help_text="Пустой список — без ограничения. Иначе whitelist типов выкладки.",
+    )
 
     class Meta:
         verbose_name = "Товар"
@@ -738,6 +744,13 @@ class EquipmentSlot(models.Model):
         default=25.0,
         verbose_name="Ширина (%)",
         help_text="Ширина ячейки в процентах от ширины ряда/полки.",
+    )
+    slot_label = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name="Подпись зоны",
+        help_text="Например: «Верх» для зоны экспозиции на манекене.",
     )
     qr_token = models.UUIDField(
         default=uuid.uuid4,

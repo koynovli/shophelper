@@ -67,6 +67,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "weight",
             "is_marked",
             "is_stackable",
+            "allowed_equipment_types",
         )
 
 
@@ -85,12 +86,31 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             "weight",
             "is_marked",
             "is_stackable",
+            "allowed_equipment_types",
         )
         extra_kwargs = {
             "gtin": {"required": False, "allow_null": True, "allow_blank": True},
             "is_marked": {"required": False},
             "is_stackable": {"required": False},
+            "allowed_equipment_types": {"required": False},
         }
+
+    def validate_allowed_equipment_types(self, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Ожидается список типов оборудования.")
+        valid = {choice[0] for choice in Equipment.EquipmentType.choices}
+        normalized: list[str] = []
+        for raw in value:
+            eq_type = str(raw).strip()
+            if eq_type not in valid:
+                raise serializers.ValidationError(
+                    f"Неизвестный тип оборудования: {eq_type!r}."
+                )
+            if eq_type not in normalized:
+                normalized.append(eq_type)
+        return normalized
 
     def validate_sku(self, value: str) -> str:
         value = (value or "").strip()
@@ -157,6 +177,7 @@ class EquipmentSlotSerializer(serializers.ModelSerializer):
             "row_index",
             "col_index",
             "width_percent",
+            "slot_label",
             "current_qty",
             "max_capacity",
             "planogram",
@@ -459,6 +480,37 @@ class PlanogramWriteSerializer(serializers.ModelSerializer):
         if value is not None and value < 1:
             raise serializers.ValidationError("Целевое количество должно быть не меньше 1.")
         return value
+
+    def validate(self, attrs):
+        slot = attrs.get("slot") or (self.instance.slot if self.instance else None)
+        product = attrs.get("product") or (self.instance.product if self.instance else None)
+        target_quantity = attrs.get(
+            "target_quantity",
+            self.instance.target_quantity if self.instance else None,
+        )
+
+        if slot is not None and product is not None:
+            equipment = (
+                slot.equipment
+                if hasattr(slot, "equipment") and slot.equipment_id
+                else Equipment.objects.filter(pk=slot.equipment_id).first()
+            )
+            allowed = product.allowed_equipment_types or []
+            if allowed and equipment is not None:
+                eq_type = str(equipment.type)
+                if eq_type not in allowed:
+                    raise serializers.ValidationError(
+                        "Товар не предназначен для этого типа оборудования."
+                    )
+            if (
+                equipment is not None
+                and str(equipment.type) == Equipment.EquipmentType.MANNEQUIN
+                and target_quantity is not None
+                and int(target_quantity) > 1
+            ):
+                attrs["target_quantity"] = 1
+
+        return attrs
 
     def _apply_capacity_defaults(self, planogram: Planogram) -> Planogram:
         from .spatial_engine import refresh_slot_max_capacity
@@ -869,6 +921,40 @@ class EquipmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipment
         fields = "__all__"
+
+    def validate(self, attrs):
+        instance = getattr(self, "instance", None)
+        if instance is None:
+            return attrs
+
+        from .equipment_layout_sync import (
+            LAYOUT_CHANGE_BLOCKED_MSG,
+            equipment_has_blocking_stock_or_tasks,
+            layout_fields_changed,
+        )
+
+        new_type = attrs.get("type", instance.type)
+        new_rows = attrs.get("rows_count", instance.rows_count)
+        if layout_fields_changed(instance, new_type=new_type, new_rows_count=new_rows):
+            if equipment_has_blocking_stock_or_tasks(instance):
+                raise serializers.ValidationError(LAYOUT_CHANGE_BLOCKED_MSG)
+        return attrs
+
+    def update(self, instance, validated_data):
+        from .equipment_layout_sync import layout_fields_changed, resync_equipment_layout
+
+        new_type = validated_data.get("type", instance.type)
+        new_rows = validated_data.get("rows_count", instance.rows_count)
+        should_resync = layout_fields_changed(
+            instance,
+            new_type=new_type,
+            new_rows_count=new_rows,
+        )
+
+        instance = super().update(instance, validated_data)
+        if should_resync:
+            resync_equipment_layout(instance)
+        return instance
 
 
 class UserSerializer(serializers.ModelSerializer):

@@ -48,12 +48,10 @@ class MvpManifestTests(TestCase):
             rows_count=2,
         )
         self.slot = self.equipment.slots.order_by("row_index", "col_index").first()
-        self.shelf = Shelf.objects.create(
+        self.shelf, _ = Shelf.objects.get_or_create(
             equipment=self.equipment,
             level=1,
-            width=100,
-            height=40,
-            depth=50,
+            defaults={"width": 100, "height": 40, "depth": 50},
         )
         self.slot.shelf = self.shelf
         self.slot.save(update_fields=["shelf"])

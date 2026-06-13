@@ -1,6 +1,11 @@
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
+from .equipment_profiles import (
+    default_slots_spec,
+    needs_shelves,
+    shelf_dimensions_for_equipment,
+)
 from .models import Equipment, EquipmentSlot, Inventory, Planogram, ProductBatch, Shelf, StockItem
 from .placement_sync import reconcile_for_product, reconcile_planogram
 from .slot_inventory_sync import link_slots_to_shelf, sync_slot_qty_from_inventory
@@ -68,62 +73,40 @@ def product_batch_created(sender, instance: ProductBatch, created: bool, **kwarg
 def _generate_default_slots_for_equipment(equipment: Equipment) -> None:
     if EquipmentSlot.objects.filter(equipment=equipment).exists():
         return
-
-    eq_type = str(equipment.type)
-    rows = int(equipment.rows_count or 0)
-
-    if eq_type in (
-        Equipment.EquipmentType.SHELF,
-        Equipment.EquipmentType.FRIDGE,
-        "shelf",
-        "shelving",
-    ):
-        rows = max(rows, 1)
-        for r in range(rows):
-            for c in range(4):
-                EquipmentSlot.objects.create(
-                    equipment=equipment,
-                    row_index=r,
-                    col_index=c,
-                    width_percent=25.0,
-                )
-        return
-
-    if eq_type in (Equipment.EquipmentType.BOX, "box", "pallet"):
+    for spec in default_slots_spec(equipment):
         EquipmentSlot.objects.create(
             equipment=equipment,
-            row_index=0,
-            col_index=0,
-            width_percent=100.0,
+            row_index=spec.row_index,
+            col_index=spec.col_index,
+            width_percent=spec.width_percent,
+            slot_label=spec.slot_label,
         )
-        return
 
-    if eq_type in (Equipment.EquipmentType.HANGER, "hanger", "pegboard"):
-        rows = max(rows, 1)
-        for r in range(min(rows, 2)):
-            EquipmentSlot.objects.create(
-                equipment=equipment,
-                row_index=r,
-                col_index=0,
-                width_percent=100.0,
-            )
-        return
 
-    if eq_type in (Equipment.EquipmentType.MANNEQUIN, "mannequin", "display"):
-        EquipmentSlot.objects.create(
+def _ensure_default_shelves_for_equipment(equipment: Equipment) -> None:
+    if not needs_shelves(equipment.type):
+        return
+    from .equipment_profiles import get_profile
+
+    profile_rows = max(int(equipment.rows_count or 0), 1)
+    profile = get_profile(equipment.type)
+    if profile.layout_mode == "linear":
+        row_count = min(profile_rows, profile.max_hanger_rows)
+    elif profile.layout_mode == "single":
+        row_count = 1
+    else:
+        row_count = profile_rows
+
+    for level in range(1, row_count + 1):
+        dims = shelf_dimensions_for_equipment(equipment, level)
+        Shelf.objects.get_or_create(
             equipment=equipment,
-            row_index=0,
-            col_index=0,
-            width_percent=100.0,
-        )
-        return
-
-    for c in range(4):
-        EquipmentSlot.objects.create(
-            equipment=equipment,
-            row_index=0,
-            col_index=c,
-            width_percent=25.0,
+            level=level,
+            defaults={
+                "width": dims["width"],
+                "height": dims["height"],
+                "depth": dims["depth"],
+            },
         )
 
 
@@ -132,3 +115,4 @@ def equipment_created(sender, instance: Equipment, created: bool, **kwargs):
     if not created:
         return
     _generate_default_slots_for_equipment(instance)
+    _ensure_default_shelves_for_equipment(instance)

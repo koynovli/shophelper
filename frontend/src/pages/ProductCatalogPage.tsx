@@ -4,6 +4,12 @@ import type { AxiosError } from 'axios';
 import { Loader2, Plus } from 'lucide-react';
 
 import api from '../api';
+import {
+  CATALOG_EQUIPMENT_PRESETS,
+  EQUIPMENT_TYPE_OPTIONS,
+  formatAllowedEquipmentTypes,
+} from '../map/equipmentProfiles';
+import type { FloorEquipmentType } from '../types/floorPlan';
 
 type CategoryRow = { id: number; name: string };
 
@@ -20,6 +26,7 @@ type ProductRow = {
   weight: number;
   is_marked: boolean;
   is_stackable: boolean;
+  allowed_equipment_types?: string[];
 };
 
 const emptyForm = {
@@ -34,6 +41,7 @@ const emptyForm = {
   weight: '500',
   is_marked: false,
   is_stackable: true,
+  allowedEquipmentTypes: [] as FloorEquipmentType[],
 };
 
 function extractList<T>(data: unknown): T[] {
@@ -137,6 +145,7 @@ export function ProductCatalogPage(): React.ReactElement {
         weight: Number(form.weight),
         is_marked: form.is_marked,
         is_stackable: form.is_stackable,
+        allowed_equipment_types: form.allowedEquipmentTypes,
       });
       setSuccess(`Товар «${form.name.trim()}» зарегистрирован. Следующий шаг — приёмка на склад.`);
       setForm({ ...emptyForm, categoryId: form.categoryId });
@@ -283,6 +292,64 @@ export function ProductCatalogPage(): React.ReactElement {
               </label>
             ))}
           </div>
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+            <p className="text-sm font-medium text-slate-200">Тип выкладки</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Пустой выбор — товар доступен на любом оборудовании. Иначе только на отмеченных
+              типах.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-3">
+              {EQUIPMENT_TYPE_OPTIONS.map((opt) => (
+                <label key={opt.value} className="flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={form.allowedEquipmentTypes.includes(opt.value)}
+                    onChange={(e) => {
+                      setForm((prev) => {
+                        const next = e.target.checked
+                          ? [...prev.allowedEquipmentTypes, opt.value]
+                          : prev.allowedEquipmentTypes.filter((t) => t !== opt.value);
+                        const needsNonStackable =
+                          next.includes('hanger') || next.includes('mannequin');
+                        return {
+                          ...prev,
+                          allowedEquipmentTypes: next,
+                          is_stackable: needsNonStackable ? false : prev.is_stackable,
+                        };
+                      });
+                    }}
+                  />
+                  {opt.label}
+                </label>
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {CATALOG_EQUIPMENT_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() =>
+                    setForm((prev) => ({
+                      ...prev,
+                      allowedEquipmentTypes: [...preset.types],
+                      is_stackable:
+                        preset.stackable === false ? false : prev.is_stackable,
+                    }))
+                  }
+                  className="rounded-full border border-slate-600 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                  title={preset.hint}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            {form.allowedEquipmentTypes.length === 1 &&
+            form.allowedEquipmentTypes[0] === 'mannequin' ? (
+              <p className="mt-2 text-xs text-indigo-300">
+                Макс. 1 ед. на зону экспозиции на манекене.
+              </p>
+            ) : null}
+          </div>
           <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
             <label className="flex items-center gap-2">
               <input
@@ -355,6 +422,7 @@ export function ProductCatalogPage(): React.ReactElement {
                   <th className="px-2 py-2">Категория</th>
                   <th className="px-2 py-2">Цена</th>
                   <th className="px-2 py-2">Ш×В×Г, мм</th>
+                  <th className="px-2 py-2">Оборудование</th>
                 </tr>
               </thead>
               <tbody>
@@ -366,6 +434,9 @@ export function ProductCatalogPage(): React.ReactElement {
                     <td className="px-2 py-2">{p.price}</td>
                     <td className="px-2 py-2 text-slate-400">
                       {p.width}×{p.height}×{p.depth}
+                    </td>
+                    <td className="px-2 py-2 text-slate-400">
+                      {formatAllowedEquipmentTypes(p.allowed_equipment_types)}
                     </td>
                   </tr>
                 ))}

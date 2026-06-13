@@ -33,6 +33,7 @@ export interface EquipmentSlot {
   row_index: number;
   col_index: number;
   width_percent: number;
+  slot_label?: string;
   current_qty?: number;
   max_capacity?: number;
   active_placement_task?: boolean;

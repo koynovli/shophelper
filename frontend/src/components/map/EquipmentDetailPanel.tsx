@@ -1,10 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Loader2, X } from 'lucide-react';
 
 import api from '../../api';
+import {
+  EQUIPMENT_TYPE_SHORT_LABELS,
+  getLayoutMode,
+  slotRowLabel,
+} from '../../map/equipmentProfiles';
 import type { EquipmentSlot, FloorEquipment } from '../../types/floorPlan';
-import { slotFillMetrics } from '../../types/floorPlan';
+import { normalizeEquipmentType, slotFillMetrics } from '../../types/floorPlan';
 
 type ProductBrief = { id: number; name: string; sku: string };
 
@@ -63,6 +68,20 @@ export function EquipmentDetailPanel({
   const selectedSlot = slotsSorted.find((s) => s.id === selectedSlotId) ?? null;
   const [qrUrl, setQrUrl] = useState<string | null>(null);
 
+  const eqType = equipment ? normalizeEquipmentType(String(equipment.type)) : 'shelf';
+  const layoutMode = equipment ? getLayoutMode(String(equipment.type)) : 'grid';
+  const isMannequin = eqType === 'mannequin';
+
+  const rowGroups = useMemo(() => {
+    const rows = new Map<number, EquipmentSlot[]>();
+    for (const slot of slotsSorted) {
+      const list = rows.get(slot.row_index) ?? [];
+      list.push(slot);
+      rows.set(slot.row_index, list);
+    }
+    return Array.from(rows.entries()).sort(([a], [b]) => a - b);
+  }, [slotsSorted]);
+
   useEffect(() => {
     if (!selectedSlotId || !open) {
       setQrUrl(null);
@@ -90,13 +109,7 @@ export function EquipmentDetailPanel({
     return null;
   }
 
-  const rowIndices = Array.from(
-    new Set(slotsSorted.map((s) => s.row_index)),
-  ).sort((a, b) => a - b);
-  const maxRow =
-    rowIndices.length > 0
-      ? rowIndices[rowIndices.length - 1]
-      : Math.max(0, (equipment.rows_count || 1) - 1);
+  const equipmentTypeLabel = EQUIPMENT_TYPE_SHORT_LABELS[eqType] ?? eqType;
 
   return (
     <aside className="fixed right-0 top-0 z-40 flex h-full w-full max-w-md flex-col border-l border-slate-700 bg-slate-900 shadow-2xl">
@@ -136,54 +149,68 @@ export function EquipmentDetailPanel({
           </div>
         ) : (
           <div className="space-y-2">
-            {Array.from({ length: maxRow + 1 }).map((_, rowIndex) => {
-              const rowSlots = slotsSorted.filter((s) => s.row_index === rowIndex);
+            {rowGroups.map(([rowIndex, rowSlots]) => {
+              const headerLabel = slotRowLabel(
+                eqType,
+                rowIndex,
+                rowSlots[0]?.slot_label,
+              );
               return (
                 <div
                   key={rowIndex}
                   className="rounded-lg border border-slate-700 bg-slate-950/50 p-2"
                 >
                   <p className="mb-2 text-[11px] uppercase tracking-wide text-slate-500">
-                    Ряд {rowIndex}
+                    {headerLabel}
                   </p>
-                  <div className="flex min-h-[56px] gap-2">
-                    {rowSlots.map((slot) => {
-                      const isActive = slot.id === selectedSlotId;
-                      const fill = slotFillMetrics(slot);
-                      const replStatus = slot.planogram?.replenishment_status;
-                      const statusClass =
-                        fill.below30 || replStatus === 'DEFICIT'
-                          ? 'border-rose-500/70 bg-rose-900/30'
-                          : replStatus === 'IN_PROGRESS' || slot.active_placement_task
-                            ? 'border-amber-500/70 bg-amber-900/25'
-                            : fill.above70
-                              ? 'border-emerald-600/60 bg-emerald-900/25'
-                              : 'border-slate-600 bg-slate-800/70';
-                      return (
-                        <button
-                          key={slot.id}
-                          type="button"
-                          onClick={() => onSelectSlot(slot.id)}
-                          style={{ flex: `0 0 ${slot.width_percent}%` }}
-                          className={`min-h-[56px] rounded-md border px-2 py-1 text-left text-xs ${statusClass} ${
-                            isActive ? 'ring-2 ring-sky-400/80' : ''
-                          }`}
-                        >
-                          {slot.planogram ? (
-                            <>
-                              <div className="truncate font-semibold">
-                                {slot.planogram.product.name}
-                              </div>
-                              <div className="text-[10px] text-sky-100">
-                                {fill.current}/{fill.cap || '—'}
-                              </div>
-                            </>
-                          ) : (
-                            <span className="text-slate-400">+ товар</span>
-                          )}
-                        </button>
-                      );
-                    })}
+                  <div
+                    className={`flex min-h-[56px] gap-2 ${
+                      layoutMode === 'grid' ? 'flex-wrap' : 'flex-col'
+                    }`}
+                  >
+                    {rowSlots
+                      .sort((a, b) => a.col_index - b.col_index)
+                      .map((slot) => {
+                        const isActive = slot.id === selectedSlotId;
+                        const fill = slotFillMetrics(slot);
+                        const replStatus = slot.planogram?.replenishment_status;
+                        const statusClass =
+                          fill.below30 || replStatus === 'DEFICIT'
+                            ? 'border-rose-500/70 bg-rose-900/30'
+                            : replStatus === 'IN_PROGRESS' || slot.active_placement_task
+                              ? 'border-amber-500/70 bg-amber-900/25'
+                              : fill.above70
+                                ? 'border-emerald-600/60 bg-emerald-900/25'
+                                : 'border-slate-600 bg-slate-800/70';
+                        return (
+                          <button
+                            key={slot.id}
+                            type="button"
+                            onClick={() => onSelectSlot(slot.id)}
+                            style={
+                              layoutMode === 'grid'
+                                ? { flex: `0 0 ${slot.width_percent}%` }
+                                : { width: '100%' }
+                            }
+                            className={`min-h-[56px] rounded-md border px-2 py-1 text-left text-xs ${statusClass} ${
+                              isActive ? 'ring-2 ring-sky-400/80' : ''
+                            }`}
+                          >
+                            {slot.planogram ? (
+                              <>
+                                <div className="truncate font-semibold">
+                                  {slot.planogram.product.name}
+                                </div>
+                                <div className="text-[10px] text-sky-100">
+                                  {fill.current}/{fill.cap || '—'}
+                                </div>
+                              </>
+                            ) : (
+                              <span className="text-slate-400">+ товар</span>
+                            )}
+                          </button>
+                        );
+                      })}
                   </div>
                 </div>
               );
@@ -194,11 +221,20 @@ export function EquipmentDetailPanel({
         {selectedSlot ? (
           <div className="mt-4 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
             <h5 className="text-sm font-semibold text-slate-200">
-              Слот: ряд {selectedSlot.row_index}, ячейка {selectedSlot.col_index}
+              {slotRowLabel(eqType, selectedSlot.row_index, selectedSlot.slot_label)}
+              {layoutMode === 'grid'
+                ? ` · ячейка ${selectedSlot.col_index}`
+                : null}
             </h5>
             {qrUrl ? (
               <p className="mt-2 break-all font-mono text-[10px] text-slate-500">
                 QR-токен: {qrUrl}
+              </p>
+            ) : null}
+            {merchProducts.length === 0 ? (
+              <p className="mt-3 rounded-md border border-amber-600/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-100">
+                Нет товаров для типа «{equipmentTypeLabel}» — настройте допустимые типы в
+                номенклатуре.
               </p>
             ) : null}
             <div className="mt-3 flex flex-col gap-2">
@@ -222,18 +258,25 @@ export function EquipmentDetailPanel({
                 <input
                   type="number"
                   min={1}
+                  max={isMannequin ? 1 : undefined}
                   value={merchTargetQty}
                   onChange={(e) =>
-                    onMerchTargetQtyChange(Math.max(1, Number(e.target.value) || 1))
+                    onMerchTargetQtyChange(
+                      Math.max(1, isMannequin ? 1 : Number(e.target.value) || 1),
+                    )
                   }
-                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white"
+                  disabled={isMannequin}
+                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
                 />
               </label>
+              {isMannequin ? (
+                <p className="text-[11px] text-slate-500">На зону экспозиции — максимум 1 ед.</p>
+              ) : null}
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={merchSaving || !merchProductId}
+                disabled={merchSaving || !merchProductId || merchProducts.length === 0}
                 onClick={onSavePlanogram}
                 className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
               >

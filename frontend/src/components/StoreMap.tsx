@@ -32,7 +32,14 @@ import type {
   FloorEquipmentType,
   FloorZone,
 } from '../types/floorPlan';
-import { normalizeFloorEquipment } from '../types/floorPlan';
+import { normalizeFloorEquipment, normalizeEquipmentType } from '../types/floorPlan';
+import {
+  defaultRowsCountForType,
+  isProductAllowedOnEquipment,
+  rowsFieldMax,
+  showsRowsField,
+  typeHint,
+} from '../map/equipmentProfiles';
 import {
   magneticSnapTopLeftPx,
   obbIntersectPx,
@@ -77,19 +84,6 @@ function normalizeEquipmentTypeValue(type: string): FloorEquipmentType {
   return map[type] ?? 'shelf';
 }
 
-function defaultRowsCountForType(type: FloorEquipmentType): number {
-  if (type === 'box' || type === 'mannequin') {
-    return 1;
-  }
-  if (type === 'hanger') {
-    return 2;
-  }
-  if (type === 'shelf' || type === 'fridge') {
-    return 4;
-  }
-  return 1;
-}
-
 function nextGlobalEquipmentName(zones: FloorZone[], type: FloorEquipmentType): string {
   const label = EQUIPMENT_TYPE_LABEL_RU[type];
   const existingNames = new Set(
@@ -108,6 +102,7 @@ type ProductBrief = {
   id: number;
   name: string;
   sku: string;
+  allowed_equipment_types?: string[];
 };
 
 type MerchTaskRow = {
@@ -797,24 +792,41 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
           selectEquipmentId(createdEquipment.id);
         }
       } else if (selectedEquipmentId) {
-        const response = await api.patch(`/floor-equipment/${selectedEquipmentId}/`, payload);
-        if (response.status === 200) {
-          const merged = normalizeFloorEquipment(response.data as Record<string, unknown>);
-          setZones((prevZones) =>
-            prevZones.map((zone) => ({
-              ...zone,
-              equipment: zone.equipment.map((eq) =>
-                eq.id === selectedEquipmentId ? { ...eq, ...merged, zone: eq.zone } : eq,
-              ),
-            })),
+        await api.patch(`/floor-equipment/${selectedEquipmentId}/`, payload);
+        const freshEquipment = await refreshEquipmentFromServer(selectedEquipmentId);
+        if (merchOpen && merchEquipmentId === selectedEquipmentId) {
+          const sortedSlots = [...(freshEquipment.slots ?? [])].sort((a, b) =>
+            a.row_index === b.row_index ? a.col_index - b.col_index : a.row_index - b.row_index,
           );
+          setSelectedSlotId((prev) => {
+            if (prev && sortedSlots.some((s) => s.id === prev)) {
+              return prev;
+            }
+            return sortedSlots[0]?.id ?? null;
+          });
         }
       }
       setIsModalOpen(false);
       resetNewEquipmentForm();
     } catch (error) {
       console.error('Ошибка при сохранении оборудования:', error);
-      alert('Не удалось сохранить оборудование. Проверьте консоль.');
+      const ax = error as AxiosError<
+        string | string[] | { detail?: string; non_field_errors?: string[] }
+      >;
+      const data = ax.response?.data;
+      let message = 'Не удалось сохранить оборудование.';
+      if (typeof data === 'string') {
+        message = data;
+      } else if (Array.isArray(data) && typeof data[0] === 'string') {
+        message = data[0];
+      } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+        if (typeof data.detail === 'string') {
+          message = data.detail;
+        } else if (data.non_field_errors?.[0]) {
+          message = data.non_field_errors[0];
+        }
+      }
+      alert(message);
     } finally {
       setIsSaving(false);
     }
@@ -964,12 +976,15 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
         api.get('/products/'),
       ]);
       const taskList = extractApiList<MerchTaskRow>(taskRes.data);
-      const prods = extractApiList<ProductBrief>(prodRes.data).sort((a, b) =>
-        a.name.localeCompare(b.name, 'ru'),
-      );
+      const allProds = extractApiList<ProductBrief>(prodRes.data);
+      const freshEquipment = await refreshEquipmentFromServer(equipmentId);
+      const prods = allProds
+        .filter((p) =>
+          isProductAllowedOnEquipment(p.allowed_equipment_types, String(freshEquipment.type)),
+        )
+        .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
       setMerchTasks(taskList);
       setMerchProducts(prods);
-      const freshEquipment = await refreshEquipmentFromServer(equipmentId);
       const sortedSlots = [...(freshEquipment.slots ?? [])].sort((a, b) =>
         a.row_index === b.row_index ? a.col_index - b.col_index : a.row_index - b.row_index,
       );
@@ -1511,10 +1526,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                     setNewEquipmentForm((prev) => ({
                       ...prev,
                       type: nextType,
-                      rowsCount:
-                        modalMode === 'create'
-                          ? defaultRowsCountForType(nextType)
-                          : prev.rowsCount,
+                      rowsCount: defaultRowsCountForType(nextType),
                       name:
                         modalMode === 'create' && !isNameManual
                           ? nextGlobalEquipmentName(zonesRef.current, nextType)
@@ -1530,6 +1542,8 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                   <option value="mannequin">Манекен</option>
                 </select>
               </label>
+
+              <p className="text-xs text-slate-500">{typeHint(newEquipmentForm.type)}</p>
 
               <div className="grid grid-cols-2 gap-3">
                 <label className="block text-sm text-slate-300">
@@ -1564,22 +1578,36 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                 </label>
               </div>
 
-              <label className="block text-sm text-slate-300">
-                Число рядов/уровней
-                <input
-                  type="number"
-                  min={0}
-                  max={50}
-                  value={newEquipmentForm.rowsCount}
-                  onChange={(ev) =>
-                    setNewEquipmentForm((prev) => ({
-                      ...prev,
-                      rowsCount: Math.max(0, Math.min(50, Number(ev.target.value) || 0)),
-                    }))
-                  }
-                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
-                />
-              </label>
+              {showsRowsField(newEquipmentForm.type) ? (
+                <label className="block text-sm text-slate-300">
+                  Число рядов/уровней
+                  <input
+                    type="number"
+                    min={1}
+                    max={rowsFieldMax(newEquipmentForm.type)}
+                    value={newEquipmentForm.rowsCount}
+                    onChange={(ev) =>
+                      setNewEquipmentForm((prev) => ({
+                        ...prev,
+                        rowsCount: Math.max(
+                          1,
+                          Math.min(
+                            rowsFieldMax(prev.type),
+                            Number(ev.target.value) || 1,
+                          ),
+                        ),
+                      }))
+                    }
+                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
+                  />
+                </label>
+              ) : (
+                <p className="rounded-md border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                  {normalizeEquipmentType(newEquipmentForm.type) === 'mannequin'
+                    ? '3 зоны экспозиции (верх / низ / аксессуар)'
+                    : 'Один слот на всю ёмкость'}
+                </p>
+              )}
 
               <label className="block text-sm text-slate-300">
                 Угол поворота (°)
