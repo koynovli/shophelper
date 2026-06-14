@@ -37,6 +37,7 @@ class SupplyOrderApiTests(TestCase):
             height=200,
             depth=50,
             weight=1000,
+            shelf_life_days=30,
         )
         self.admin = User.objects.create_user(
             username="admin_so",
@@ -93,7 +94,7 @@ class SupplyOrderApiTests(TestCase):
         order_id = create_resp.data["id"]
         item_id = create_resp.data["items"][0]["id"]
         task = SupplyReceivingTask.objects.get(supply_order_id=order_id)
-        exp = (timezone.now().date() + timedelta(days=30)).isoformat()
+        mfg = (timezone.now().date() - timedelta(days=2)).isoformat()
 
         self.client.force_authenticate(self.employee)
         self.client.post(f"/api/receiving-tasks/{task.pk}/accept/")
@@ -103,7 +104,7 @@ class SupplyOrderApiTests(TestCase):
                 "lines": [
                     {
                         "item_id": item_id,
-                        "expiration_date": exp,
+                        "manufacture_date": mfg,
                         "actual_quantity": 10,
                     }
                 ]
@@ -128,9 +129,9 @@ class SupplyOrderApiTests(TestCase):
         order_id = create_resp.data["id"]
         item_id = create_resp.data["items"][0]["id"]
         task = SupplyReceivingTask.objects.get(supply_order_id=order_id)
-        exp = (timezone.now().date() + timedelta(days=30)).isoformat()
+        mfg = (timezone.now().date() - timedelta(days=2)).isoformat()
         payload = {
-            "lines": [{"item_id": item_id, "expiration_date": exp, "actual_quantity": 10}],
+            "lines": [{"item_id": item_id, "manufacture_date": mfg, "actual_quantity": 10}],
         }
         self.client.force_authenticate(self.employee)
         self.client.post(f"/api/receiving-tasks/{task.pk}/accept/")

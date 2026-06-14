@@ -29,17 +29,19 @@ export function getSlotVisualState(
     slot.planogram?.replenishment_status === 'IN_PROGRESS';
 
   let level: SlotFillLevel = 'empty';
-  if (fill.cap > 0) {
-    const ratio = fill.current / fill.cap;
-    if (ratio > 0.7) {
-      level = 'green';
-    } else if (ratio >= 0.3) {
-      level = 'yellow';
+  if (slot.planogram) {
+    if (fill.cap > 0) {
+      const ratio = fill.current / fill.cap;
+      if (ratio > 0.7) {
+        level = 'green';
+      } else if (ratio >= 0.3) {
+        level = 'yellow';
+      } else {
+        level = 'red';
+      }
     } else {
-      level = 'red';
+      level = 'yellow';
     }
-  } else if (slot.planogram) {
-    level = 'yellow';
   }
 
   if (hasTask && level === 'green') {

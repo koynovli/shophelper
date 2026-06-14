@@ -12,6 +12,7 @@ from .product_tracking import (
 from .views import (
     CategoryViewSet,
     EquipmentSlotAdjustView,
+    EquipmentSlotCapacityPreviewView,
     EquipmentSlotQrView,
     EquipmentViewSet,
     InventoryViewSet,
@@ -89,6 +90,11 @@ urlpatterns = [
         "slots/<int:pk>/adjust-qty/",
         EquipmentSlotAdjustView.as_view(),
         name="slot-adjust-qty",
+    ),
+    path(
+        "slots/<int:pk>/capacity-preview/",
+        EquipmentSlotCapacityPreviewView.as_view(),
+        name="slot-capacity-preview",
     ),
     path("", include(router.urls)),
 ]

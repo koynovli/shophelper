@@ -18,6 +18,8 @@ LAYOUT_CHANGE_BLOCKED_MSG = (
     "Нельзя изменить тип/ряды: на оборудовании есть товар или активная задача выкладки."
 )
 
+_UNSET = object()
+
 
 def equipment_has_blocking_stock_or_tasks(equipment: Equipment) -> bool:
     if EquipmentSlot.objects.filter(equipment=equipment, current_qty__gt=0).exists():
@@ -144,9 +146,14 @@ def layout_fields_changed(
     *,
     new_type: str | None = None,
     new_rows_count: int | None = None,
+    new_row_slot_layouts: object = _UNSET,
 ) -> bool:
     if new_type is not None and str(new_type) != str(equipment.type):
         return True
     if new_rows_count is not None and int(new_rows_count) != int(equipment.rows_count or 0):
+        return True
+    if new_row_slot_layouts is not _UNSET and (
+        new_row_slot_layouts or []
+    ) != (equipment.row_slot_layouts or []):
         return True
     return False

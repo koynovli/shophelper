@@ -9,9 +9,10 @@ type ReceivingLine = {
   item_id: number;
   product_name: string;
   sku: string;
+  shelf_life_days: number | null;
   quantity: number;
   actualQty: string;
-  expiry: string;
+  manufactureDate: string;
   note: string;
 };
 
@@ -24,7 +25,11 @@ type ReceivingTaskDetail = {
     items: {
       id: number;
       quantity: number;
-      product_detail?: { name: string; sku: string };
+      product_detail?: {
+        name: string;
+        sku: string;
+        shelf_life_days?: number | null;
+      };
     }[];
   };
 };
@@ -65,6 +70,27 @@ function formatPlannedDate(iso: string | null | undefined): string {
   return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(d);
 }
 
+function tracksExpiry(shelfLifeDays: number | null | undefined): boolean {
+  return shelfLifeDays != null && shelfLifeDays > 0;
+}
+
+function previewExpirationDate(manufactureDate: string, shelfLifeDays: number): string {
+  const base = new Date(`${manufactureDate}T00:00:00`);
+  if (Number.isNaN(base.getTime())) {
+    return '';
+  }
+  base.setDate(base.getDate() + shelfLifeDays);
+  return base.toISOString().slice(0, 10);
+}
+
+function formatRuDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) {
+    return iso;
+  }
+  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(d);
+}
+
 export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactElement {
   const [detail, setDetail] = useState<ReceivingTaskDetail | null>(null);
   const [lines, setLines] = useState<ReceivingLine[]>([]);
@@ -90,9 +116,10 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
             item_id: item.id,
             product_name: item.product_detail?.name ?? `Товар #${item.id}`,
             sku: item.product_detail?.sku ?? '—',
+            shelf_life_days: item.product_detail?.shelf_life_days ?? null,
             quantity: item.quantity,
             actualQty: String(item.quantity),
-            expiry: '',
+            manufactureDate: '',
             note: '',
           })),
         );
@@ -131,8 +158,8 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
 
   const complete = async (): Promise<void> => {
     for (const line of lines) {
-      if (!line.expiry) {
-        setError(`Укажите срок годности: ${line.product_name}`);
+      if (tracksExpiry(line.shelf_life_days) && !line.manufactureDate) {
+        setError(`Укажите дату производства: ${line.product_name}`);
         return;
       }
     }
@@ -152,7 +179,9 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
       await api.post(`/receiving-tasks/${task.id}/complete/`, {
         lines: lines.map((line) => ({
           item_id: line.item_id,
-          expiration_date: line.expiry,
+          manufacture_date: tracksExpiry(line.shelf_life_days)
+            ? line.manufactureDate
+            : null,
           actual_quantity: Math.max(0, Math.floor(Number(line.actualQty) || 0)),
           discrepancy_note: line.note.trim(),
         })),
@@ -188,7 +217,8 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
         </p>
       ) : null}
       <p className="text-xs text-slate-400">
-        Заказ #{detail?.supply_order.id ?? task.supply_order_id}. Сверьте количество и сроки.
+        Заказ #{detail?.supply_order.id ?? task.supply_order_id}. Сверьте количество и даты
+        производства.
       </p>
       {plannedDate ? (
         <p className="text-xs text-sky-300">
@@ -251,6 +281,14 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
           const ordered = line.quantity;
           const actual = Math.floor(Number(line.actualQty) || 0);
           const mismatch = actual !== ordered;
+          const needsDate = tracksExpiry(line.shelf_life_days);
+          const expiryPreview =
+            needsDate &&
+            line.manufactureDate &&
+            line.shelf_life_days != null &&
+            line.shelf_life_days > 0
+              ? previewExpirationDate(line.manufactureDate, line.shelf_life_days)
+              : '';
           return (
             <div
               key={line.item_id}
@@ -284,23 +322,40 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
                     className="mt-1 w-full rounded border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
                   />
                 </label>
-                <label className="block text-xs text-slate-400">
-                  Срок годности
-                  <input
-                    type="date"
-                    disabled={!inProgress}
-                    value={line.expiry}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setLines((prev) =>
-                        prev.map((l) =>
-                          l.item_id === line.item_id ? { ...l, expiry: v } : l,
-                        ),
-                      );
-                    }}
-                    className="mt-1 w-full rounded border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
-                  />
-                </label>
+                {needsDate ? (
+                  <>
+                    <label className="block text-xs text-slate-400">
+                      Дата производства
+                      <input
+                        type="date"
+                        disabled={!inProgress}
+                        value={line.manufactureDate}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setLines((prev) =>
+                            prev.map((l) =>
+                              l.item_id === line.item_id
+                                ? { ...l, manufactureDate: v }
+                                : l,
+                            ),
+                          );
+                        }}
+                        className="mt-1 w-full rounded border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
+                      />
+                    </label>
+                    {expiryPreview ? (
+                      <p className="text-xs text-sky-300">
+                        Срок годности до:{' '}
+                        <strong>{formatRuDate(expiryPreview)}</strong>
+                        {line.shelf_life_days != null
+                          ? ` (+${line.shelf_life_days} дн. из номенклатуры)`
+                          : null}
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">Срок годности не контролируется</p>
+                )}
                 {mismatch ? (
                   <label className="block text-xs text-amber-200/90">
                     Примечание (расхождение)

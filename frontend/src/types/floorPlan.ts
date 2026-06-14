@@ -13,6 +13,11 @@ export interface FloorShelf {
   depth: number;
 }
 
+export interface RowSlotLayout {
+  slot_count: number;
+  widths: number[];
+}
+
 export interface FloorEquipment {
   id: number;
   name: string;
@@ -24,6 +29,7 @@ export interface FloorEquipment {
   height: number;
   rotation: number;
   rows_count: number;
+  row_slot_layouts?: RowSlotLayout[];
   shelves: FloorShelf[];
   slots?: EquipmentSlot[];
 }
@@ -107,8 +113,8 @@ export function slotFillMetrics(slot: EquipmentSlot): {
     current,
     cap,
     percent,
-    below30: cap > 0 && current / cap < 0.3,
-    above70: cap > 0 && current / cap > 0.7,
+    below30: !!slot.planogram && cap > 0 && current / cap < 0.3,
+    above70: !!slot.planogram && cap > 0 && current / cap > 0.7,
   };
 }
 
@@ -142,6 +148,9 @@ export function normalizeFloorEquipment(raw: Record<string, unknown>): FloorEqui
     height: parseFiniteNumber(raw.height, 0),
     rotation,
     rows_count: rowsCount,
+    row_slot_layouts: Array.isArray(raw.row_slot_layouts)
+      ? (raw.row_slot_layouts as RowSlotLayout[])
+      : [],
     shelves: Array.isArray(raw.shelves) ? (raw.shelves as FloorShelf[]) : [],
     slots: Array.isArray(raw.slots) ? (raw.slots as EquipmentSlot[]) : [],
   };

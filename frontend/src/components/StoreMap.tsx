@@ -31,6 +31,7 @@ import type {
   FloorEquipment,
   FloorEquipmentType,
   FloorZone,
+  RowSlotLayout,
 } from '../types/floorPlan';
 import { normalizeFloorEquipment, normalizeEquipmentType } from '../types/floorPlan';
 import {
@@ -82,6 +83,35 @@ function normalizeEquipmentTypeValue(type: string): FloorEquipmentType {
     mannequin: 'mannequin',
   };
   return map[type] ?? 'shelf';
+}
+
+const GRID_SLOT_TYPES: FloorEquipmentType[] = ['shelf', 'fridge'];
+const MAX_SLOTS_PER_ROW = 8;
+
+function supportsCustomSlots(type: FloorEquipmentType): boolean {
+  return GRID_SLOT_TYPES.includes(type);
+}
+
+function evenWidths(count: number): number[] {
+  const safe = Math.max(1, Math.min(count, MAX_SLOTS_PER_ROW));
+  const base = Math.round((100 / safe) * 100) / 100;
+  const widths = Array(safe).fill(base);
+  widths[safe - 1] = Math.round((100 - base * (safe - 1)) * 100) / 100;
+  return widths;
+}
+
+function defaultRowLayout(): RowSlotLayout {
+  return { slot_count: 4, widths: evenWidths(4) };
+}
+
+function buildRowLayouts(
+  rowsCount: number,
+  previous: RowSlotLayout[] = [],
+): RowSlotLayout[] {
+  const rows = Math.max(0, Math.floor(rowsCount));
+  return Array.from({ length: rows }, (_, i) =>
+    previous[i] ? previous[i] : defaultRowLayout(),
+  );
 }
 
 function nextGlobalEquipmentName(zones: FloorZone[], type: FloorEquipmentType): string {
@@ -201,6 +231,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
     rotation: 0,
     type: 'shelf' as FloorEquipmentType,
     rowsCount: 4,
+    rowSlotLayouts: buildRowLayouts(4) as RowSlotLayout[],
   });
   const [isSaving, setIsSaving] = useState(false);
   const [merchOpen, setMerchOpen] = useState(false);
@@ -211,6 +242,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
   const [merchProducts, setMerchProducts] = useState<ProductBrief[]>([]);
   const [merchProductId, setMerchProductId] = useState('');
   const [merchTargetQty, setMerchTargetQty] = useState(1);
+  const [merchSlotCapacity, setMerchSlotCapacity] = useState<number | null>(null);
   const [merchLoading, setMerchLoading] = useState(false);
   const [merchSaving, setMerchSaving] = useState(false);
   const [merchFeedback, setMerchFeedback] = useState<{
@@ -361,7 +393,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
 
   useEffect(() => {
     void loadPendingTaskEquipmentIds();
-  }, [loadPendingTaskEquipmentIds, zones]);
+  }, [loadPendingTaskEquipmentIds]);
 
   const mapWidthPx = dimensions.width * 100 * PX_PER_CM;
   const mapHeightPx = dimensions.height * 100 * PX_PER_CM;
@@ -568,6 +600,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
         rotation: 0,
         type: 'shelf',
         rowsCount: defaultRowsCountForType('shelf'),
+        rowSlotLayouts: buildRowLayouts(defaultRowsCountForType('shelf')),
       });
       setIsModalOpen(true);
     },
@@ -746,6 +779,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       rotation: 0,
       type: 'shelf',
       rowsCount: defaultRowsCountForType('shelf'),
+      rowSlotLayouts: buildRowLayouts(defaultRowsCountForType('shelf')),
     });
   };
 
@@ -768,6 +802,10 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       height: newEquipmentForm.lengthCm,
       rotation: snapRotationDeg(newEquipmentForm.rotation),
       rows_count: newEquipmentForm.rowsCount,
+      row_slot_layouts:
+        supportsCustomSlots(newEquipmentForm.type) && showsRowsField(newEquipmentForm.type)
+          ? newEquipmentForm.rowSlotLayouts
+          : [],
     };
 
     try {
@@ -919,6 +957,10 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       rotation: equipment.rotation,
       type: normalizeEquipmentTypeValue(String(equipment.type)),
       rowsCount: equipment.rows_count ?? 0,
+      rowSlotLayouts: buildRowLayouts(
+        equipment.rows_count ?? 0,
+        equipment.row_slot_layouts ?? [],
+      ),
     });
     setIsModalOpen(true);
   }, [selectEquipmentId]);
@@ -966,6 +1008,20 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
     );
     return normalized;
   }, []);
+
+  const fetchSlotCapacityPreview = useCallback(
+    async (slotId: number, productId: number): Promise<number | null> => {
+      try {
+        const r = await api.get<{ max_capacity: number }>(`/slots/${slotId}/capacity-preview/`, {
+          params: { product: productId },
+        });
+        return Math.max(0, Number(r.data.max_capacity) || 0);
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
 
   const fetchMerchData = useCallback(async (equipmentId: number): Promise<void> => {
     setMerchLoading(true);
@@ -1038,50 +1094,112 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
       );
       setSelectedSlotId(sortedSlots[0]?.id ?? null);
       setMerchOpen(true);
-      setMerchTargetQty(1);
       void fetchMerchData(equipment.id);
     },
     [fetchMerchData],
   );
 
   useEffect(() => {
-    if (!selectedSlot) {
+    if (!selectedSlot?.planogram) {
       return;
     }
-    if (selectedSlot.planogram) {
-      setMerchProductId(String(selectedSlot.planogram.product.id));
-      setMerchTargetQty(selectedSlot.planogram.target_quantity);
-      return;
-    }
-    setMerchTargetQty(1);
-  }, [selectedSlot]);
+    setMerchProductId(String(selectedSlot.planogram.product.id));
+    setMerchTargetQty(selectedSlot.planogram.target_quantity);
+  }, [
+    selectedSlotId,
+    selectedSlot?.planogram?.id,
+    selectedSlot?.planogram?.target_quantity,
+    selectedSlot?.planogram?.product?.id,
+  ]);
 
-  const handleMerchCreateTestProduct = useCallback(async (): Promise<void> => {
-    if (!merchEquipmentId) {
+  useEffect(() => {
+    if (!merchOpen || !selectedSlot || !merchProductId || merchEquipmentId === null) {
+      setMerchSlotCapacity(null);
       return;
     }
-    try {
-      setMerchSaving(true);
-      setMerchFeedback(null);
-      const r = await api.post<ProductBrief>('/products/create-test/');
-      const p = r.data;
-      setMerchProducts((prev) =>
-        [...prev, p].sort((a, b) => a.name.localeCompare(b.name, 'ru')),
-      );
-      setMerchProductId(String(p.id));
-      setMerchFeedback({ type: 'ok', text: 'Тестовый товар создан.' });
-      await fetchMerchData(merchEquipmentId);
-    } catch (err) {
-      const ax = err as AxiosError<{ detail?: string }>;
-      const detail = ax.response?.data?.detail;
+    const pid = Number(merchProductId);
+    if (!pid || Number.isNaN(pid)) {
+      setMerchSlotCapacity(null);
+      return;
+    }
+
+    const slotId = selectedSlot.id;
+    const hasSavedPlanogram =
+      !!selectedSlot.planogram &&
+      String(selectedSlot.planogram.product.id) === merchProductId;
+    const isMannequin =
+      normalizeEquipmentType(String(merchEquipment?.type ?? 'shelf')) === 'mannequin';
+
+    let cancelled = false;
+    void (async () => {
+      const cap = await fetchSlotCapacityPreview(slotId, pid);
+      if (cancelled) {
+        return;
+      }
+      if (cap === null) {
+        setMerchSlotCapacity(null);
+        return;
+      }
+      setMerchSlotCapacity(cap);
+
+      if (hasSavedPlanogram) {
+        return;
+      }
+      if (cap > 0) {
+        setMerchTargetQty(isMannequin ? 1 : cap);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    merchOpen,
+    selectedSlotId,
+    selectedSlot?.planogram?.id,
+    selectedSlot?.planogram?.product?.id,
+    merchProductId,
+    merchEquipmentId,
+    fetchSlotCapacityPreview,
+    merchEquipment?.type,
+  ]);
+
+  const handleAutoCalculateTarget = useCallback(async (): Promise<void> => {
+    if (!selectedSlot || !merchProductId || merchEquipmentId === null) {
+      return;
+    }
+    const pid = Number(merchProductId);
+    if (!pid || Number.isNaN(pid)) {
+      return;
+    }
+    const cap = await fetchSlotCapacityPreview(selectedSlot.id, pid);
+    if (cap === null) {
+      setMerchFeedback({ type: 'err', text: 'Не удалось рассчитать вместимость слота.' });
+      return;
+    }
+    setMerchSlotCapacity(cap);
+    const isMannequin =
+      normalizeEquipmentType(String(merchEquipment?.type ?? 'shelf')) === 'mannequin';
+    if (isMannequin) {
+      setMerchTargetQty(1);
+      return;
+    }
+    if (cap < 1) {
       setMerchFeedback({
         type: 'err',
-        text: typeof detail === 'string' ? detail : 'Не удалось создать тестовый товар.',
+        text: 'Товар не помещается в слот по габаритам — проверьте размеры в номенклатуре.',
       });
-    } finally {
-      setMerchSaving(false);
+      return;
     }
-  }, [fetchMerchData, merchEquipmentId]);
+    setMerchTargetQty(cap);
+    setMerchFeedback(null);
+  }, [
+    selectedSlot,
+    merchProductId,
+    merchEquipmentId,
+    fetchSlotCapacityPreview,
+    merchEquipment?.type,
+  ]);
 
   const handleAddPlanogram = useCallback(async (): Promise<void> => {
     if (!merchEquipmentId) {
@@ -1523,10 +1641,12 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                   value={newEquipmentForm.type}
                   onChange={(ev) => {
                     const nextType = ev.target.value as FloorEquipmentType;
+                    const nextRows = defaultRowsCountForType(nextType);
                     setNewEquipmentForm((prev) => ({
                       ...prev,
                       type: nextType,
-                      rowsCount: defaultRowsCountForType(nextType),
+                      rowsCount: nextRows,
+                      rowSlotLayouts: buildRowLayouts(nextRows),
                       name:
                         modalMode === 'create' && !isNameManual
                           ? nextGlobalEquipmentName(zonesRef.current, nextType)
@@ -1587,16 +1707,23 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                     max={rowsFieldMax(newEquipmentForm.type)}
                     value={newEquipmentForm.rowsCount}
                     onChange={(ev) =>
-                      setNewEquipmentForm((prev) => ({
-                        ...prev,
-                        rowsCount: Math.max(
+                      setNewEquipmentForm((prev) => {
+                        const nextRows = Math.max(
                           1,
                           Math.min(
                             rowsFieldMax(prev.type),
                             Number(ev.target.value) || 1,
                           ),
-                        ),
-                      }))
+                        );
+                        return {
+                          ...prev,
+                          rowsCount: nextRows,
+                          rowSlotLayouts: buildRowLayouts(
+                            nextRows,
+                            prev.rowSlotLayouts,
+                          ),
+                        };
+                      })
                     }
                     className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
                   />
@@ -1608,6 +1735,118 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                     : 'Один слот на всю ёмкость'}
                 </p>
               )}
+
+              {supportsCustomSlots(newEquipmentForm.type) &&
+              showsRowsField(newEquipmentForm.type) ? (
+                <div className="space-y-3 rounded-md border border-slate-700 bg-slate-900/60 p-3">
+                  <p className="text-sm font-medium text-slate-200">
+                    Разбивка рядов на слоты
+                  </p>
+                  {newEquipmentForm.rowSlotLayouts.map((row, rowIdx) => {
+                    const sum = row.widths.reduce((a, b) => a + (Number(b) || 0), 0);
+                    const sumOk = Math.abs(sum - 100) <= 1;
+                    return (
+                      <div
+                        key={rowIdx}
+                        className="space-y-2 rounded border border-slate-800 bg-slate-950/40 p-2"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs text-slate-300">
+                          <span className="font-medium">Ряд {rowIdx + 1}</span>
+                          <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-1">
+                              Слотов
+                              <input
+                                type="number"
+                                min={1}
+                                max={MAX_SLOTS_PER_ROW}
+                                value={row.slot_count}
+                                onChange={(ev) => {
+                                  const count = Math.max(
+                                    1,
+                                    Math.min(
+                                      MAX_SLOTS_PER_ROW,
+                                      Number(ev.target.value) || 1,
+                                    ),
+                                  );
+                                  setNewEquipmentForm((prev) => ({
+                                    ...prev,
+                                    rowSlotLayouts: prev.rowSlotLayouts.map((r, i) =>
+                                      i === rowIdx
+                                        ? { slot_count: count, widths: evenWidths(count) }
+                                        : r,
+                                    ),
+                                  }));
+                                }}
+                                className="w-14 rounded border border-slate-600 bg-slate-900 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setNewEquipmentForm((prev) => ({
+                                  ...prev,
+                                  rowSlotLayouts: prev.rowSlotLayouts.map((r, i) =>
+                                    i === rowIdx
+                                      ? { ...r, widths: evenWidths(r.slot_count) }
+                                      : r,
+                                  ),
+                                }))
+                              }
+                              className="rounded border border-slate-600 px-2 py-1 text-slate-200 hover:bg-slate-800"
+                            >
+                              Поровну
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {row.widths.map((w, slotIdx) => (
+                            <label
+                              key={slotIdx}
+                              className="flex items-center gap-1 text-xs text-slate-400"
+                            >
+                              #{slotIdx + 1}
+                              <input
+                                type="number"
+                                min={1}
+                                max={100}
+                                value={w}
+                                onChange={(ev) => {
+                                  const val = Math.max(
+                                    0,
+                                    Math.min(100, Number(ev.target.value) || 0),
+                                  );
+                                  setNewEquipmentForm((prev) => ({
+                                    ...prev,
+                                    rowSlotLayouts: prev.rowSlotLayouts.map((r, i) =>
+                                      i === rowIdx
+                                        ? {
+                                            ...r,
+                                            widths: r.widths.map((cw, ci) =>
+                                              ci === slotIdx ? val : cw,
+                                            ),
+                                          }
+                                        : r,
+                                    ),
+                                  }));
+                                }}
+                                className="w-16 rounded border border-slate-600 bg-slate-900 px-2 py-1 text-slate-100 outline-none focus:border-emerald-500"
+                              />
+                              %
+                            </label>
+                          ))}
+                        </div>
+                        <p
+                          className={`text-xs ${
+                            sumOk ? 'text-slate-500' : 'text-amber-400'
+                          }`}
+                        >
+                          Сумма: {Math.round(sum * 100) / 100}% (должно быть 100%)
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
 
               <label className="block text-sm text-slate-300">
                 Угол поворота (°)
@@ -1696,10 +1935,11 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
         onMerchProductIdChange={setMerchProductId}
         merchTargetQty={merchTargetQty}
         onMerchTargetQtyChange={setMerchTargetQty}
+        merchSlotCapacity={merchSlotCapacity}
+        onAutoCalculateTarget={() => void handleAutoCalculateTarget()}
         onSavePlanogram={() => void handleAddPlanogram()}
         onSimulateSale={() => void handleSimulateSale()}
         onDeletePlanogram={() => void handleDeletePlanogram()}
-        onCreateTestProduct={() => void handleMerchCreateTestProduct()}
       />
     </section>
   );

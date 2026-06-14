@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from .equipment_profiles import virtual_shelf_dimensions_for_slot
+from .equipment_profiles import (
+    normalize_equipment_type,
+    shelf_dimensions_for_equipment,
+    virtual_shelf_dimensions_for_slot,
+)
 from .models import Equipment, EquipmentSlot, Product, Shelf
 
 BULK_FILL_FACTOR = 0.8
@@ -34,6 +38,10 @@ def calculate_max_capacity_from_dimensions(
     if stackable:
         nz = int(sh_mm // ph)
     else:
+        nz = 1
+
+    # Товар выше полки: вертикально не штабелируется, но фейсинг nx×ny возможен.
+    if nx > 0 and ny > 0 and nz < 1:
         nz = 1
 
     return max(0, nx * ny * nz)
@@ -89,10 +97,12 @@ def _get_equipment_for_slot(slot: EquipmentSlot) -> Equipment | None:
 
 def resolve_shelf_for_slot(slot: EquipmentSlot) -> Shelf | None:
     equipment = _get_equipment_for_slot(slot)
-    if equipment and str(equipment.type) == Equipment.EquipmentType.MANNEQUIN:
+    if equipment and normalize_equipment_type(str(equipment.type)) == Equipment.EquipmentType.MANNEQUIN:
         return None
     if slot.shelf_id:
-        return slot.shelf
+        shelf = Shelf.objects.filter(pk=slot.shelf_id).first()
+        if shelf is not None:
+            return shelf
     return (
         Shelf.objects.filter(
             equipment_id=slot.equipment_id,
@@ -104,13 +114,13 @@ def resolve_shelf_for_slot(slot: EquipmentSlot) -> Shelf | None:
 def _equipment_type_for_slot(slot: EquipmentSlot) -> str:
     equipment = _get_equipment_for_slot(slot)
     if equipment:
-        return str(equipment.type)
+        return normalize_equipment_type(str(equipment.type))
     found = (
         Equipment.objects.filter(pk=slot.equipment_id)
         .values_list("type", flat=True)
         .first()
     )
-    return str(found or Equipment.EquipmentType.SHELF)
+    return normalize_equipment_type(str(found or Equipment.EquipmentType.SHELF))
 
 
 def _dimensions_for_capacity(slot: EquipmentSlot, equipment: Equipment | None) -> tuple[float, float, float] | None:
@@ -122,9 +132,11 @@ def _dimensions_for_capacity(slot: EquipmentSlot, equipment: Equipment | None) -
     if equipment is None:
         return None
     virtual = virtual_shelf_dimensions_for_slot(slot, equipment)
-    if virtual is None:
-        return None
-    return virtual["width"], virtual["height"], virtual["depth"]
+    if virtual is not None:
+        return virtual["width"], virtual["height"], virtual["depth"]
+    level = max(1, int(slot.row_index or 0) + 1)
+    dims = shelf_dimensions_for_equipment(equipment, level)
+    return dims["width"], dims["height"], dims["depth"]
 
 
 def calculate_slot_max_capacity(slot: EquipmentSlot, product: Product) -> int:
@@ -146,16 +158,23 @@ def calculate_slot_max_capacity(slot: EquipmentSlot, product: Product) -> int:
     if eq_type == Equipment.EquipmentType.HANGER:
         return calculate_linear_hanger_capacity(sw, product, width_fraction=width_fraction)
 
-    force_single = eq_type == Equipment.EquipmentType.FRIDGE and not getattr(
-        product, "is_stackable", True
+    # Открытый стеллаж: считаем фейсингом в один ярус (одежда, сложенный текстиль,
+    # выкладка лицом) — товар не штабелируется в башню как в боксе.
+    force_single = eq_type in (
+        Equipment.EquipmentType.SHELF,
+        Equipment.EquipmentType.HANGER,
     )
+    if eq_type == Equipment.EquipmentType.FRIDGE and not getattr(
+        product, "is_stackable", True
+    ):
+        force_single = True
     return calculate_max_capacity_from_dimensions(
         sw,
         sh,
         sd,
         product,
         width_fraction=width_fraction,
-        force_single_layer=force_single or eq_type == Equipment.EquipmentType.HANGER,
+        force_single_layer=force_single,
     )
 
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { AxiosError } from 'axios';
 
 import api from '../api';
@@ -7,6 +7,7 @@ type ProductRow = {
   id: number;
   name: string;
   sku: string;
+  shelf_life_days?: number | null;
 };
 
 type FeedbackState = { type: 'ok' | 'err'; text: string } | null;
@@ -22,11 +23,32 @@ function extractList<T>(data: unknown): T[] {
   return [];
 }
 
+function tracksExpiry(shelfLifeDays: number | null | undefined): boolean {
+  return shelfLifeDays != null && shelfLifeDays > 0;
+}
+
+function previewExpirationDate(manufactureDate: string, shelfLifeDays: number): string {
+  const base = new Date(`${manufactureDate}T00:00:00`);
+  if (Number.isNaN(base.getTime())) {
+    return '';
+  }
+  base.setDate(base.getDate() + shelfLifeDays);
+  return base.toISOString().slice(0, 10);
+}
+
+function formatRuDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) {
+    return iso;
+  }
+  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(d);
+}
+
 export function ReceivingPanel(): React.ReactElement {
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [productId, setProductId] = useState<string>('');
   const [quantity, setQuantity] = useState<number>(1);
-  const [expiryDate, setExpiryDate] = useState<string>('');
+  const [manufactureDate, setManufactureDate] = useState<string>('');
   const [saving, setSaving] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
 
@@ -46,30 +68,46 @@ export function ReceivingPanel(): React.ReactElement {
     void fetchProducts();
   }, []);
 
+  const selectedProduct = useMemo(
+    () => products.find((p) => String(p.id) === productId) ?? null,
+    [products, productId],
+  );
+  const needsManufactureDate = tracksExpiry(selectedProduct?.shelf_life_days);
+  const expiryPreview =
+    needsManufactureDate &&
+    manufactureDate &&
+    selectedProduct?.shelf_life_days != null &&
+    selectedProduct.shelf_life_days > 0
+      ? previewExpirationDate(manufactureDate, selectedProduct.shelf_life_days)
+      : '';
+
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!productId) {
       setFeedback({ type: 'err', text: 'Выберите товар.' });
       return;
     }
-    if (!expiryDate) {
-      setFeedback({ type: 'err', text: 'Укажите срок годности.' });
+    if (needsManufactureDate && !manufactureDate) {
+      setFeedback({ type: 'err', text: 'Укажите дату производства.' });
       return;
     }
     try {
       setSaving(true);
       setFeedback(null);
-      await api.post('/batches/', {
+      const payload: Record<string, unknown> = {
         product: Number(productId),
         quantity: Math.max(1, Math.floor(quantity)),
-        expiry_date: expiryDate,
-      });
+      };
+      if (needsManufactureDate) {
+        payload.manufacture_date = manufactureDate;
+      }
+      await api.post('/batches/', payload);
       setFeedback({
         type: 'ok',
         text: 'Партия создана. Остатки обновлены, проверка планограмм запущена.',
       });
       setQuantity(1);
-      setExpiryDate('');
+      setManufactureDate('');
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
       const detail = ax.response?.data?.detail;
@@ -105,7 +143,10 @@ export function ReceivingPanel(): React.ReactElement {
           <select
             className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-slate-100"
             value={productId}
-            onChange={(event) => setProductId(event.target.value)}
+            onChange={(event) => {
+              setProductId(event.target.value);
+              setManufactureDate('');
+            }}
             disabled={products.length === 0}
           >
             {products.map((product) => (
@@ -125,15 +166,24 @@ export function ReceivingPanel(): React.ReactElement {
             className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-slate-100"
           />
         </label>
-        <label className="text-sm text-slate-300">
-          Срок годности
-          <input
-            type="date"
-            value={expiryDate}
-            onChange={(event) => setExpiryDate(event.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-slate-100"
-          />
-        </label>
+        {needsManufactureDate ? (
+          <label className="text-sm text-slate-300">
+            Дата производства
+            <input
+              type="date"
+              value={manufactureDate}
+              onChange={(event) => setManufactureDate(event.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-slate-100"
+            />
+          </label>
+        ) : (
+          <p className="self-end text-sm text-slate-500">Срок годности не контролируется</p>
+        )}
+        {expiryPreview ? (
+          <p className="text-sm text-sky-300 sm:col-span-2">
+            Срок годности до: <strong>{formatRuDate(expiryPreview)}</strong>
+          </p>
+        ) : null}
         <div className="sm:col-span-2">
           <button
             type="submit"

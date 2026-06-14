@@ -1,5 +1,3 @@
-import random
-import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -411,7 +409,7 @@ class SupplyReceivingTaskViewSet(viewsets.ReadOnlyModelViewSet):
         lines = [
             {
                 "item_id": row["item_id"],
-                "expiration_date": row["expiration_date"],
+                "manufacture_date": row.get("manufacture_date"),
                 "actual_quantity": row["actual_quantity"],
                 "discrepancy_note": row.get("discrepancy_note", ""),
             }
@@ -671,58 +669,28 @@ class ProductViewSet(viewsets.ModelViewSet):
         return ProductBriefSerializer
 
     def get_permissions(self):
-        if self.action in ("create", "update", "partial_update", "destroy", "create_test"):
+        if self.action in (
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "delete_info",
+        ):
             return [IsAuthenticated(), IsRoleAdmin()]
         return [IsAuthenticated()]
 
     def perform_destroy(self, instance: Product) -> None:
-        blockers: list[str] = []
-        if Planogram.objects.filter(product=instance).exists():
-            blockers.append("планограммы")
-        if ProductBatch.objects.filter(product=instance).exists():
-            blockers.append("партии")
-        if PlacementTask.objects.filter(product=instance).exists():
-            blockers.append("задачи выкладки")
-        if StockItem.objects.filter(product=instance, quantity__gt=0).exists():
-            blockers.append("остаток на складе")
-        if blockers:
-            from rest_framework.exceptions import ValidationError
+        from .product_delete_guard import ensure_product_can_be_deleted
 
-            raise ValidationError(
-                {"detail": f"Нельзя удалить: есть связанные {', '.join(blockers)}."}
-            )
+        ensure_product_can_be_deleted(instance)
         instance.delete()
 
-    @action(detail=False, methods=["post"], url_path="create-test")
-    def create_test(self, request):
-        if getattr(request.user, "role", None) != User.Role.ADMIN:
-            return Response(
-                {"detail": "Создание тестового товара доступно только администратору."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        category, _ = Category.objects.get_or_create(name="Служебная категория (выкладка)")
-        suffix = uuid.uuid4().hex[:10]
-        sku = f"TEST-PL-{suffix}"
-        product = Product.objects.create(
-            name=f"Тестовый товар ({suffix})",
-            sku=sku,
-            gtin=None,
-            category=category,
-            price=Decimal("1.00"),
-            width=round(random.uniform(50.0, 100.0), 1),
-            height=round(random.uniform(50.0, 200.0), 1),
-            depth=round(random.uniform(40.0, 80.0), 1),
-            weight=round(random.uniform(100.0, 1000.0), 1),
-            is_marked=False,
-        )
-        StockItem.objects.update_or_create(
-            product=product,
-            defaults={"quantity": 24},
-        )
-        return Response(
-            ProductBriefSerializer(product).data,
-            status=status.HTTP_201_CREATED,
-        )
+    @action(detail=True, methods=["get"], url_path="delete-info")
+    def delete_info(self, request, pk=None):
+        from .product_delete_guard import assess_product_deletion
+
+        product = self.get_object()
+        return Response(assess_product_deletion(product).to_dict())
 
 
 class PlacementTaskFilter(filters.FilterSet):
@@ -850,6 +818,40 @@ class EquipmentSlotAdjustView(APIView):
                 "max_capacity": slot.max_capacity,
             },
         )
+
+
+class EquipmentSlotCapacityPreviewView(APIView):
+    """Предпросмотр max_capacity слота для товара (мерчандайзинг)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int):
+        product_raw = request.query_params.get("product")
+        if product_raw is None or str(product_raw).strip() == "":
+            return Response(
+                {"detail": "Укажите query-параметр product."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            product_id = int(product_raw)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Некорректный product."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        slot = EquipmentSlot.objects.select_related("equipment").filter(pk=pk).first()
+        if slot is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        product = Product.objects.filter(pk=product_id).first()
+        if product is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        from .spatial_engine import calculate_slot_max_capacity
+
+        cap = calculate_slot_max_capacity(slot, product)
+        return Response({"max_capacity": cap})
 
 
 class PlanogramFilter(filters.FilterSet):

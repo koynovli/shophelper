@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AxiosError } from 'axios';
-import { Loader2, Plus } from 'lucide-react';
+import { Loader2, Pencil, Plus, Trash2 } from 'lucide-react';
 
 import api from '../api';
 import {
@@ -10,6 +10,7 @@ import {
   formatAllowedEquipmentTypes,
 } from '../map/equipmentProfiles';
 import type { FloorEquipmentType } from '../types/floorPlan';
+import { normalizeEquipmentType } from '../types/floorPlan';
 
 type CategoryRow = { id: number; name: string };
 
@@ -27,9 +28,30 @@ type ProductRow = {
   is_marked: boolean;
   is_stackable: boolean;
   allowed_equipment_types?: string[];
+  shelf_life_days?: number | null;
 };
 
-const emptyForm = {
+type ProductFormState = {
+  name: string;
+  sku: string;
+  gtin: string;
+  categoryId: string;
+  price: string;
+  width: string;
+  height: string;
+  depth: string;
+  weight: string;
+  is_marked: boolean;
+  is_stackable: boolean;
+  allowedEquipmentTypes: FloorEquipmentType[];
+  shelfLifeDays: string;
+};
+
+const VALID_EQUIPMENT_TYPES = new Set<FloorEquipmentType>(
+  EQUIPMENT_TYPE_OPTIONS.map((o) => o.value),
+);
+
+const emptyForm: ProductFormState = {
   name: '',
   sku: '',
   gtin: '',
@@ -41,7 +63,8 @@ const emptyForm = {
   weight: '500',
   is_marked: false,
   is_stackable: true,
-  allowedEquipmentTypes: [] as FloorEquipmentType[],
+  allowedEquipmentTypes: [],
+  shelfLifeDays: '',
 };
 
 function extractList<T>(data: unknown): T[] {
@@ -55,6 +78,73 @@ function extractList<T>(data: unknown): T[] {
   return [];
 }
 
+function parseApiError(err: unknown, fallback: string): string {
+  const ax = err as AxiosError<
+    string | string[] | Record<string, string[] | string> & { detail?: string }
+  >;
+  const data = ax.response?.data;
+  if (typeof data === 'string') {
+    return data;
+  }
+  if (Array.isArray(data) && typeof data[0] === 'string') {
+    return data[0];
+  }
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    if (typeof data.detail === 'string') {
+      return data.detail;
+    }
+    const first = Object.values(data).flat()[0];
+    if (typeof first === 'string') {
+      return first;
+    }
+  }
+  return fallback;
+}
+
+function productToForm(product: ProductRow): ProductFormState {
+  const allowedEquipmentTypes = (product.allowed_equipment_types ?? [])
+    .map((t) => normalizeEquipmentType(String(t)))
+    .filter((t): t is FloorEquipmentType => VALID_EQUIPMENT_TYPES.has(t));
+  return {
+    name: product.name,
+    sku: product.sku,
+    gtin: product.gtin ?? '',
+    categoryId: String(product.category.id),
+    price: String(product.price),
+    width: String(product.width),
+    height: String(product.height),
+    depth: String(product.depth),
+    weight: String(product.weight),
+    is_marked: product.is_marked,
+    is_stackable: product.is_stackable,
+    allowedEquipmentTypes,
+    shelfLifeDays:
+      product.shelf_life_days != null && product.shelf_life_days > 0
+        ? String(product.shelf_life_days)
+        : '',
+  };
+}
+
+function buildProductPayload(form: ProductFormState): Record<string, unknown> {
+  return {
+    name: form.name.trim(),
+    sku: form.sku.trim(),
+    gtin: form.gtin.trim() || null,
+    category: Number(form.categoryId),
+    price: form.price,
+    width: Number(form.width),
+    height: Number(form.height),
+    depth: Number(form.depth),
+    weight: Number(form.weight),
+    is_marked: form.is_marked,
+    is_stackable: form.is_stackable,
+    allowed_equipment_types: form.allowedEquipmentTypes,
+    shelf_life_days: form.shelfLifeDays.trim()
+      ? Math.max(1, Math.floor(Number(form.shelfLifeDays) || 0))
+      : null,
+  };
+}
+
 export function ProductCatalogPage(): React.ReactElement {
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -62,7 +152,8 @@ export function ProductCatalogPage(): React.ReactElement {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [form, setForm] = useState(emptyForm);
+  const [form, setForm] = useState<ProductFormState>(emptyForm);
+  const [editingProductId, setEditingProductId] = useState<number | null>(null);
   const [newCategoryName, setNewCategoryName] = useState('');
 
   const load = useCallback(async (): Promise<void> => {
@@ -94,11 +185,73 @@ export function ProductCatalogPage(): React.ReactElement {
   }, [load]);
 
   useEffect(() => {
-    if (form.categoryId || categories.length === 0) {
+    if (editingProductId !== null || form.categoryId || categories.length === 0) {
       return;
     }
     setForm((f) => ({ ...f, categoryId: String(categories[0]?.id ?? '') }));
-  }, [categories, form.categoryId]);
+  }, [categories, form.categoryId, editingProductId]);
+
+  const resetProductForm = (categoryId?: string): void => {
+    setEditingProductId(null);
+    setForm({
+      ...emptyForm,
+      categoryId: categoryId ?? String(categories[0]?.id ?? ''),
+    });
+  };
+
+  const cancelEdit = (): void => {
+    resetProductForm(form.categoryId);
+    setSuccess(null);
+  };
+
+  const startEdit = (product: ProductRow): void => {
+    setEditingProductId(product.id);
+    setForm(productToForm(product));
+    setError(null);
+    setSuccess(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const deleteProduct = async (product: ProductRow): Promise<void> => {
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const { data } = await api.get<{
+        can_delete: boolean;
+        blockers: string[];
+        warnings: string[];
+      }>(`/products/${product.id}/delete-info/`);
+
+      if (!data.can_delete) {
+        setError(
+          data.blockers.length
+            ? `Нельзя удалить: есть ${data.blockers.join(', ')}.`
+            : 'Нельзя удалить этот товар.',
+        );
+        return;
+      }
+
+      let confirmMessage = `Удалить товар «${product.name}» (SKU: ${product.sku})? Действие необратимо.`;
+      if (data.warnings.length > 0) {
+        confirmMessage = `${data.warnings.join('\n\n')}\n\n${confirmMessage}`;
+      }
+      if (!window.confirm(confirmMessage)) {
+        return;
+      }
+
+      await api.delete(`/products/${product.id}/`);
+      setSuccess(`Товар «${product.name}» удалён.`);
+      if (editingProductId === product.id) {
+        resetProductForm(form.categoryId);
+      }
+      await load();
+    } catch (err) {
+      setError(parseApiError(err, 'Не удалось удалить товар.'));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const addCategory = async (): Promise<void> => {
     const name = newCategoryName.trim();
@@ -114,10 +267,7 @@ export function ProductCatalogPage(): React.ReactElement {
       setNewCategoryName('');
       setSuccess(`Категория «${data.name}» добавлена.`);
     } catch (err) {
-      const ax = err as AxiosError<{ detail?: string; name?: string[] }>;
-      const detail = ax.response?.data?.detail;
-      const nameErr = ax.response?.data?.name?.[0];
-      setError(typeof detail === 'string' ? detail : nameErr ?? 'Не удалось создать категорию.');
+      setError(parseApiError(err, 'Не удалось создать категорию.'));
     } finally {
       setSaving(false);
     }
@@ -132,46 +282,41 @@ export function ProductCatalogPage(): React.ReactElement {
     setSaving(true);
     setError(null);
     setSuccess(null);
+    const payload = buildProductPayload(form);
     try {
-      await api.post('/products/', {
-        name: form.name.trim(),
-        sku: form.sku.trim(),
-        gtin: form.gtin.trim() || null,
-        category: Number(form.categoryId),
-        price: form.price,
-        width: Number(form.width),
-        height: Number(form.height),
-        depth: Number(form.depth),
-        weight: Number(form.weight),
-        is_marked: form.is_marked,
-        is_stackable: form.is_stackable,
-        allowed_equipment_types: form.allowedEquipmentTypes,
-      });
-      setSuccess(`Товар «${form.name.trim()}» зарегистрирован. Следующий шаг — приёмка на склад.`);
-      setForm({ ...emptyForm, categoryId: form.categoryId });
+      if (editingProductId === null) {
+        await api.post('/products/', payload);
+        setSuccess(`Товар «${form.name.trim()}» зарегистрирован. Следующий шаг — приёмка на склад.`);
+        resetProductForm(form.categoryId);
+      } else {
+        await api.patch(`/products/${editingProductId}/`, payload);
+        setSuccess(`Товар «${form.name.trim()}» обновлён.`);
+        resetProductForm(form.categoryId);
+      }
       await load();
     } catch (err) {
-      const ax = err as AxiosError<Record<string, string[] | string> & { detail?: string }>;
-      const data = ax.response?.data;
-      if (data?.detail && typeof data.detail === 'string') {
-        setError(data.detail);
-      } else if (data) {
-        const first = Object.values(data).flat()[0];
-        setError(typeof first === 'string' ? first : 'Проверьте поля формы.');
-      } else {
-        setError('Не удалось зарегистрировать товар.');
-      }
+      setError(
+        parseApiError(
+          err,
+          editingProductId === null
+            ? 'Не удалось зарегистрировать товар.'
+            : 'Не удалось сохранить изменения.',
+        ),
+      );
     } finally {
       setSaving(false);
     }
   };
+
+  const isEditing = editingProductId !== null;
+  const editingProduct = products.find((p) => p.id === editingProductId);
 
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold text-white">Номенклатура</h2>
         <p className="mt-1 text-sm text-slate-400">
-          Шаг 1 жизненного цикла: регистрация карточки товара (SKU, габариты для расчёта
+          Шаг 1 жизненного цикла: регистрация и правка карточки товара (SKU, габариты для расчёта
           вместимости слота). Склад и партии — на вкладке «Приёмка».
         </p>
       </div>
@@ -205,11 +350,24 @@ export function ProductCatalogPage(): React.ReactElement {
       <div className="grid gap-6 lg:grid-cols-2">
         <form
           onSubmit={(e) => void submitProduct(e)}
-          className="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+          className={`rounded-xl border p-4 ${
+            isEditing
+              ? 'border-violet-500/50 bg-violet-950/20'
+              : 'border-slate-800 bg-slate-900/60'
+          }`}
         >
           <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
-            <Plus className="h-4 w-4 text-violet-400" />
-            Добавить товар
+            {isEditing ? (
+              <>
+                <Pencil className="h-4 w-4 text-violet-400" />
+                Редактирование: {editingProduct?.name ?? form.name}
+              </>
+            ) : (
+              <>
+                <Plus className="h-4 w-4 text-violet-400" />
+                Добавить товар
+              </>
+            )}
           </h3>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="sm:col-span-2 text-sm text-slate-300">
@@ -266,9 +424,27 @@ export function ProductCatalogPage(): React.ReactElement {
                 className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2"
               />
             </label>
+            <label className="text-sm text-slate-300">
+              Срок годности, дней
+              <input
+                type="number"
+                min="1"
+                step="1"
+                placeholder="Не контролируется"
+                value={form.shelfLifeDays}
+                onChange={(e) => setForm({ ...form, shelfLifeDays: e.target.value })}
+                className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2"
+              />
+            </label>
           </div>
+          <p className="mt-2 text-xs text-slate-500">
+            Срок в днях от даты производства — при приёмке указывается только дата выпуска. Для
+            одежды и товаров без контроля срока оставьте поле пустым.
+          </p>
           <p className="mt-3 text-xs text-slate-500">
-            Габариты в мм — для расчёта max_capacity на слоте (3D-укладка).
+            Габариты в мм — для расчёта max_capacity на слоте (3D-укладка). Для сложенной
+            одежды на полке снимите «Можно штабелировать» и задайте размеры пачки, например
+            300×50×250 (Ш×В×Г).
           </p>
           <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
             {(['width', 'height', 'depth', 'weight'] as const).map((key) => (
@@ -368,14 +544,26 @@ export function ProductCatalogPage(): React.ReactElement {
               Маркировка (Честный ЗНАК)
             </label>
           </div>
-          <button
-            type="submit"
-            disabled={saving}
-            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-violet-600 py-2.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
-          >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            Зарегистрировать товар
-          </button>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-violet-600 py-2.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {isEditing ? 'Сохранить изменения' : 'Зарегистрировать товар'}
+            </button>
+            {isEditing ? (
+              <button
+                type="button"
+                disabled={saving}
+                onClick={cancelEdit}
+                className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+            ) : null}
+          </div>
         </form>
 
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
@@ -401,7 +589,7 @@ export function ProductCatalogPage(): React.ReactElement {
             <Link to="/admin?tab=receiving" className="text-sky-300 underline">
               Приёмку
             </Link>{' '}
-            для создания партии со сроком годности.
+            для оприходования партии (дата производства или без дат — по карточке товара).
           </p>
         </div>
       </div>
@@ -422,12 +610,19 @@ export function ProductCatalogPage(): React.ReactElement {
                   <th className="px-2 py-2">Категория</th>
                   <th className="px-2 py-2">Цена</th>
                   <th className="px-2 py-2">Ш×В×Г, мм</th>
+                  <th className="px-2 py-2">Срок, дн.</th>
                   <th className="px-2 py-2">Оборудование</th>
+                  <th className="px-2 py-2">Действия</th>
                 </tr>
               </thead>
               <tbody>
                 {products.map((p) => (
-                  <tr key={p.id} className="border-t border-slate-800 text-slate-200">
+                  <tr
+                    key={p.id}
+                    className={`border-t border-slate-800 text-slate-200 ${
+                      editingProductId === p.id ? 'bg-violet-950/30' : ''
+                    }`}
+                  >
                     <td className="px-2 py-2 font-medium">{p.name}</td>
                     <td className="px-2 py-2">{p.sku}</td>
                     <td className="px-2 py-2">{p.category.name}</td>
@@ -436,7 +631,34 @@ export function ProductCatalogPage(): React.ReactElement {
                       {p.width}×{p.height}×{p.depth}
                     </td>
                     <td className="px-2 py-2 text-slate-400">
+                      {p.shelf_life_days != null && p.shelf_life_days > 0
+                        ? `${p.shelf_life_days} дн.`
+                        : '—'}
+                    </td>
+                    <td className="px-2 py-2 text-slate-400">
                       {formatAllowedEquipmentTypes(p.allowed_equipment_types)}
+                    </td>
+                    <td className="px-2 py-2">
+                      <div className="flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => startEdit(p)}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                        >
+                          <Pencil className="h-3 w-3" />
+                          Изменить
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => void deleteProduct(p)}
+                          className="inline-flex items-center gap-1 rounded-md border border-rose-500/50 px-2 py-1 text-xs text-rose-100 hover:bg-rose-950/40 disabled:opacity-50"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          Удалить
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

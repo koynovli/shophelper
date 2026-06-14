@@ -30,6 +30,8 @@ TES для SMB-ритейла: цифровой план зала, FEFO-парт
 - `POST /api/categories/` — новая категория (admin)
 - `GET /api/products/` — каталог с габаритами и `allowed_equipment_types`
 - `POST /api/products/` — регистрация товара (admin)
+- `PATCH /api/products/{id}/` — правка карточки (admin); пересчитывает `max_capacity` на слотах с планограммой
+- `DELETE /api/products/{id}/` — удаление (admin), если нет партий, планограмм, остатков на складе и активных задач выкладки
 
 **Совместимость с оборудованием:** поле `Product.allowed_equipment_types` — список типов (`shelf`, `hanger`, `fridge`, `box`, `mannequin`). Пустой список = без ограничений. При сохранении планограммы несовместимый товар отклоняется (`PlanogramWriteSerializer`).
 

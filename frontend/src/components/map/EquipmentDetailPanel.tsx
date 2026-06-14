@@ -37,10 +37,11 @@ type Props = {
   onMerchProductIdChange: (id: string) => void;
   merchTargetQty: number;
   onMerchTargetQtyChange: (qty: number) => void;
+  merchSlotCapacity: number | null;
+  onAutoCalculateTarget: () => void;
   onSavePlanogram: () => void;
   onSimulateSale: () => void;
   onDeletePlanogram: () => void;
-  onCreateTestProduct: () => void;
 };
 
 export function EquipmentDetailPanel({
@@ -60,10 +61,11 @@ export function EquipmentDetailPanel({
   onMerchProductIdChange,
   merchTargetQty,
   onMerchTargetQtyChange,
+  merchSlotCapacity,
+  onAutoCalculateTarget,
   onSavePlanogram,
   onSimulateSale,
   onDeletePlanogram,
-  onCreateTestProduct,
 }: Props): React.ReactElement | null {
   const selectedSlot = slotsSorted.find((s) => s.id === selectedSlotId) ?? null;
   const [qrUrl, setQrUrl] = useState<string | null>(null);
@@ -253,22 +255,36 @@ export function EquipmentDetailPanel({
                   ))}
                 </select>
               </label>
-              <label className="text-sm text-slate-300">
-                Цель, шт.
-                <input
-                  type="number"
-                  min={1}
-                  max={isMannequin ? 1 : undefined}
-                  value={merchTargetQty}
-                  onChange={(e) =>
-                    onMerchTargetQtyChange(
-                      Math.max(1, isMannequin ? 1 : Number(e.target.value) || 1),
-                    )
-                  }
-                  disabled={isMannequin}
-                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
-                />
-              </label>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="min-w-[8rem] flex-1 text-sm text-slate-300">
+                  Цель, шт.
+                  <input
+                    type="number"
+                    min={1}
+                    max={isMannequin ? 1 : undefined}
+                    value={merchTargetQty}
+                    onChange={(e) =>
+                      onMerchTargetQtyChange(
+                        Math.max(1, isMannequin ? 1 : Number(e.target.value) || 1),
+                      )
+                    }
+                    disabled={isMannequin}
+                    className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={merchSaving || merchLoading || !merchProductId || merchProducts.length === 0}
+                  onClick={onAutoCalculateTarget}
+                  className="rounded-md border border-sky-500/60 px-3 py-2 text-xs text-sky-100 disabled:opacity-50"
+                >
+                  Авторассчёт
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Вместимость слота:{' '}
+                {merchSlotCapacity != null && merchSlotCapacity > 0 ? merchSlotCapacity : '—'}
+              </p>
               {isMannequin ? (
                 <p className="text-[11px] text-slate-500">На зону экспозиции — максимум 1 ед.</p>
               ) : null}
@@ -297,14 +313,6 @@ export function EquipmentDetailPanel({
                 className="rounded-md border border-rose-500/60 px-3 py-1.5 text-xs text-rose-100 disabled:opacity-50"
               >
                 Очистить
-              </button>
-              <button
-                type="button"
-                disabled={merchSaving}
-                onClick={onCreateTestProduct}
-                className="rounded-md border border-slate-600 px-3 py-1.5 text-xs text-slate-200"
-              >
-                Тестовый товар
               </button>
               <Link
                 to="/admin?tab=catalog"

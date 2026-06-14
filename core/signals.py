@@ -32,11 +32,17 @@ def planogram_saved(sender, instance: Planogram, **kwargs):
 @receiver(post_delete, sender=Planogram)
 def planogram_deleted(sender, instance: Planogram, **kwargs):
     from .models import PlacementTask
+    from .spatial_engine import refresh_slot_max_capacity
 
     PlacementTask.objects.filter(
         planogram_id=instance.pk,
         status__in=(PlacementTask.Status.CREATED, PlacementTask.Status.PENDING),
     ).delete()
+
+    slot = instance.slot
+    if slot is not None:
+        refresh_slot_max_capacity(slot)
+        EquipmentSlot.objects.filter(pk=slot.pk).update(current_qty=0)
 
 
 @receiver(post_save, sender=StockItem)

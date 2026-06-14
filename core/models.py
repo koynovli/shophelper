@@ -195,6 +195,12 @@ class Product(models.Model):
         verbose_name="Допустимые типы оборудования",
         help_text="Пустой список — без ограничения. Иначе whitelist типов выкладки.",
     )
+    shelf_life_days = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Срок годности (дней)",
+        help_text="От даты производства. Пусто — контроль срока не ведётся.",
+    )
 
     class Meta:
         verbose_name = "Товар"
@@ -712,6 +718,15 @@ class Equipment(models.Model):
         help_text=(
             "Количество уровней для визуализации и слотов: для стеллажа — полки, "
             "для перфопанели — ряды крючков, для паллеты обычно 1."
+        ),
+    )
+    row_slot_layouts = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="Разбивка рядов на слоты",
+        help_text=(
+            "Список по рядам: [{\"slot_count\": N, \"widths\": [..]}]. "
+            "Пусто — стандартная сетка профиля."
         ),
     )
 

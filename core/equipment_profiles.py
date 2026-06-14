@@ -90,12 +90,72 @@ def default_rows_count(eq_type: str) -> int:
     return get_profile(eq_type).default_rows_count
 
 
+MAX_SLOTS_PER_ROW = 8
+
+
+def _grid_specs_from_custom_layouts(equipment: Equipment, rows: int) -> list[SlotSpec] | None:
+    """Слоты из Equipment.row_slot_layouts; None — если разбивка не задана/невалидна."""
+    layouts = getattr(equipment, "row_slot_layouts", None)
+    if not layouts or not isinstance(layouts, list):
+        return None
+
+    specs: list[SlotSpec] = []
+    for r in range(rows):
+        row_cfg = layouts[r] if r < len(layouts) else None
+        if not isinstance(row_cfg, dict):
+            count = 1
+            widths = [100.0]
+        else:
+            count = int(row_cfg.get("slot_count") or 0)
+            count = max(1, min(count, MAX_SLOTS_PER_ROW))
+            raw_widths = row_cfg.get("widths") or []
+            widths = [float(w) for w in raw_widths if isinstance(w, (int, float))]
+            if len(widths) != count or sum(widths) <= 0:
+                widths = [round(100.0 / count, 4)] * count
+        for c in range(count):
+            specs.append(
+                SlotSpec(
+                    row_index=r,
+                    col_index=c,
+                    width_percent=widths[c],
+                )
+            )
+    return specs
+
+
+def validate_row_slot_layouts(layouts, rows_count: int) -> str | None:
+    """Возвращает текст ошибки или None. Пустой список допустим (стандартная сетка)."""
+    if layouts in (None, []):
+        return None
+    if not isinstance(layouts, list):
+        return "Разбивка рядов должна быть списком."
+    if rows_count and len(layouts) != int(rows_count):
+        return "Число строк разбивки должно совпадать с числом рядов."
+    for idx, row_cfg in enumerate(layouts):
+        if not isinstance(row_cfg, dict):
+            return f"Ряд {idx + 1}: ожидается объект с slot_count и widths."
+        count = int(row_cfg.get("slot_count") or 0)
+        if count < 1 or count > MAX_SLOTS_PER_ROW:
+            return f"Ряд {idx + 1}: число слотов 1–{MAX_SLOTS_PER_ROW}."
+        widths = row_cfg.get("widths") or []
+        if not isinstance(widths, list) or len(widths) != count:
+            return f"Ряд {idx + 1}: число значений ширины должно равняться числу слотов."
+        if not all(isinstance(w, (int, float)) and w > 0 for w in widths):
+            return f"Ряд {idx + 1}: ширины должны быть положительными числами."
+        if abs(sum(widths) - 100.0) > 1.0:
+            return f"Ряд {idx + 1}: сумма ширин должна быть 100%."
+    return None
+
+
 def default_slots_spec(equipment: Equipment) -> list[SlotSpec]:
     profile = get_profile(equipment.type)
     rows = int(equipment.rows_count or 0) or profile.default_rows_count
 
     if profile.layout_mode == "grid":
         rows = max(rows, 1)
+        custom = _grid_specs_from_custom_layouts(equipment, rows)
+        if custom is not None:
+            return custom
         specs: list[SlotSpec] = []
         for r in range(rows):
             for c in range(profile.cols_per_row):

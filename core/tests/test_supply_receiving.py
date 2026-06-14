@@ -8,6 +8,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from core.batch_expiry import FAR_FUTURE_EXPIRY
 from core.models import (
     Category,
     Company,
@@ -36,6 +37,7 @@ class SupplyReceivingTaskTests(TestCase):
             height=200,
             depth=50,
             weight=1000,
+            shelf_life_days=30,
         )
         self.admin = User.objects.create_user(
             username="admin_rec",
@@ -77,6 +79,9 @@ class SupplyReceivingTaskTests(TestCase):
         task = SupplyReceivingTask.objects.get(supply_order_id=order_id)
         return order_id, task.pk, resp.data["items"][0]["id"]
 
+    def _manufacture_date(self, days_ago: int = 2) -> str:
+        return (timezone.now().date() - timedelta(days=days_ago)).isoformat()
+
     def test_submit_creates_receiving_task(self):
         order_id, task_id, _ = self._create_ordered_with_task()
         order = SupplyOrder.objects.get(pk=order_id)
@@ -98,14 +103,14 @@ class SupplyReceivingTaskTests(TestCase):
         order_id, task_id, item_id = self._create_ordered_with_task()
         self.client.force_authenticate(self.employee)
         self.client.post(f"/api/receiving-tasks/{task_id}/accept/")
-        exp = (timezone.now().date() + timedelta(days=30)).isoformat()
+        mfg = self._manufacture_date()
         complete = self.client.post(
             f"/api/receiving-tasks/{task_id}/complete/",
             {
                 "lines": [
                     {
                         "item_id": item_id,
-                        "expiration_date": exp,
+                        "manufacture_date": mfg,
                         "actual_quantity": 8,
                         "discrepancy_note": "2 боя",
                     }
@@ -120,13 +125,18 @@ class SupplyReceivingTaskTests(TestCase):
         item = order.items.first()
         assert item.actual_quantity == 8
         assert item.discrepancy_note == "2 боя"
-        assert ProductBatch.objects.filter(supply_item=item).exists()
+        batch = ProductBatch.objects.filter(supply_item=item).first()
+        assert batch is not None
+        assert batch.manufacture_date.isoformat() == mfg
+        assert batch.expiration_date == timezone.now().date() - timedelta(days=2) + timedelta(
+            days=30
+        )
 
     def test_pool_employee_can_accept_unassigned(self):
         order_id, task_id, item_id = self._create_ordered_with_task()
         self.client.force_authenticate(self.employee)
         assert self.client.post(f"/api/receiving-tasks/{task_id}/accept/").status_code == 200
-        exp = (timezone.now().date() + timedelta(days=14)).isoformat()
+        mfg = self._manufacture_date()
         assert (
             self.client.post(
                 f"/api/receiving-tasks/{task_id}/complete/",
@@ -134,7 +144,7 @@ class SupplyReceivingTaskTests(TestCase):
                     "lines": [
                         {
                             "item_id": item_id,
-                            "expiration_date": exp,
+                            "manufacture_date": mfg,
                             "actual_quantity": 10,
                         }
                     ]
@@ -154,10 +164,10 @@ class SupplyReceivingTaskTests(TestCase):
         _, task_id, item_id = self._create_ordered_with_task()
         self.client.force_authenticate(self.employee)
         self.client.post(f"/api/receiving-tasks/{task_id}/accept/")
-        exp = (timezone.now().date() + timedelta(days=30)).isoformat()
+        mfg = self._manufacture_date()
         payload = {
             "lines": [
-                {"item_id": item_id, "expiration_date": exp, "actual_quantity": 10}
+                {"item_id": item_id, "manufacture_date": mfg, "actual_quantity": 10}
             ]
         }
         self.client.post(
@@ -242,15 +252,84 @@ class SupplyReceivingTaskTests(TestCase):
         order_id, task_id, item_id = self._create_ordered_with_task()
         self.client.force_authenticate(self.employee)
         self.client.post(f"/api/receiving-tasks/{task_id}/accept/")
-        exp = (timezone.now().date() + timedelta(days=30)).isoformat()
+        mfg = self._manufacture_date()
         complete = self.client.post(
             f"/api/receiving-tasks/{task_id}/complete/",
             {
                 "lines": [
                     {
                         "item_id": item_id,
-                        "expiration_date": exp,
+                        "manufacture_date": mfg,
                         "actual_quantity": 7,
+                    }
+                ]
+            },
+            format="json",
+        )
+        assert complete.status_code == 400
+        assert SupplyOrder.objects.get(pk=order_id).status == SupplyOrder.Status.ORDERED
+
+    def test_complete_without_dates_for_non_expiring_product(self):
+        apparel = Product.objects.create(
+            name="Футболка",
+            sku="TSH-REC",
+            category=self.category,
+            price=Decimal("500.00"),
+            width=300,
+            height=50,
+            depth=250,
+            weight=200,
+            shelf_life_days=None,
+        )
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/supply-orders/",
+            {
+                "status": "ordered",
+                "items": [
+                    {
+                        "product": apparel.pk,
+                        "quantity": 5,
+                        "purchase_price": "200.00",
+                    }
+                ],
+            },
+            format="json",
+        )
+        order_id = resp.data["id"]
+        item_id = resp.data["items"][0]["id"]
+        task_id = SupplyReceivingTask.objects.get(supply_order_id=order_id).pk
+        self.client.force_authenticate(self.employee)
+        self.client.post(f"/api/receiving-tasks/{task_id}/accept/")
+        complete = self.client.post(
+            f"/api/receiving-tasks/{task_id}/complete/",
+            {
+                "lines": [
+                    {
+                        "item_id": item_id,
+                        "actual_quantity": 5,
+                    }
+                ]
+            },
+            format="json",
+        )
+        assert complete.status_code == 200
+        batch = ProductBatch.objects.filter(supply_item_id=item_id).first()
+        assert batch is not None
+        assert batch.manufacture_date is None
+        assert batch.expiration_date == FAR_FUTURE_EXPIRY
+
+    def test_complete_requires_manufacture_date_when_shelf_life_set(self):
+        order_id, task_id, item_id = self._create_ordered_with_task()
+        self.client.force_authenticate(self.employee)
+        self.client.post(f"/api/receiving-tasks/{task_id}/accept/")
+        complete = self.client.post(
+            f"/api/receiving-tasks/{task_id}/complete/",
+            {
+                "lines": [
+                    {
+                        "item_id": item_id,
+                        "actual_quantity": 10,
                     }
                 ]
             },

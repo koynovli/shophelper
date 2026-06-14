@@ -39,7 +39,8 @@ const PROFILES: Record<FloorEquipmentType, Profile> = {
     mannequinZones: 3,
     showsRowsField: true,
     rowsFieldMax: 50,
-    typeHint: 'Сетка 4 ячейки на ряд. Полки создаются автоматически.',
+    typeHint:
+      'Слоты настраиваются по рядам ниже (число ячеек и ширина каждой). Полки создаются автоматически.',
   },
   fridge: {
     layoutMode: 'grid',
@@ -48,7 +49,8 @@ const PROFILES: Record<FloorEquipmentType, Profile> = {
     mannequinZones: 3,
     showsRowsField: true,
     rowsFieldMax: 50,
-    typeHint: 'Сетка как у стеллажа. Нештабелируемые товары — один ярус.',
+    typeHint:
+      'Слоты настраиваются по рядам ниже. Нештабелируемые товары — один ярус.',
   },
   hanger: {
     layoutMode: 'linear',
@@ -142,6 +144,14 @@ export const CATALOG_EQUIPMENT_PRESETS: {
     label: 'Одежда на вешалке',
     types: ['hanger'],
     stackable: false,
+    hint: 'Для сложенной одежды на полке выберите пресет «Одежда на полке».',
+  },
+  {
+    id: 'shelf-apparel',
+    label: 'Одежда на полке',
+    types: ['shelf'],
+    stackable: false,
+    hint: 'Сложенный текстиль. Габариты в мм, например 300×50×250 (Ш×В×Г).',
   },
   {
     id: 'fridge',

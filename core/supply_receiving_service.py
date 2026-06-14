@@ -23,7 +23,7 @@ class SupplyReceivingError(Exception):
     pass
 
 
-def parse_expiration_date(raw) -> date | None:
+def parse_manufacture_date(raw) -> date | None:
     if isinstance(raw, date):
         return raw
     if isinstance(raw, str):
@@ -38,7 +38,7 @@ def execute_supply_order_receive(
     received_by: AbstractUser | None,
 ) -> SupplyOrder:
     """
-    lines: [{item_id, expiration_date, actual_quantity, discrepancy_note?}, ...]
+    lines: [{item_id, manufacture_date, actual_quantity, discrepancy_note?}, ...]
     """
     if order.status == SupplyOrder.Status.RECEIVED:
         raise SupplyReceivingError("Заказ уже принят.")
@@ -67,16 +67,21 @@ def execute_supply_order_receive(
                     f"Позиция заказа id={item_id} не найдена."
                 )
 
-            exp_raw = line.get("expiration_date")
-            if exp_raw is None:
-                raise SupplyReceivingError(
-                    f"Укажите срок годности для позиции id={item_id}."
+            exp_raw = line.get("manufacture_date")
+            mfg_date = parse_manufacture_date(exp_raw) if exp_raw is not None else None
+
+            try:
+                from .batch_expiry import batch_dates_for_receiving, product_tracks_expiry
+
+                if product_tracks_expiry(item.product) and mfg_date is None:
+                    raise SupplyReceivingError(
+                        f"Укажите дату производства для позиции id={item_id}."
+                    )
+                manufacture_date, exp_date = batch_dates_for_receiving(
+                    item.product, mfg_date
                 )
-            exp_date = parse_expiration_date(exp_raw)
-            if exp_date is None:
-                raise SupplyReceivingError(
-                    "Некорректная дата expiration_date (ожидается YYYY-MM-DD)."
-                )
+            except ValueError as exc:
+                raise SupplyReceivingError(str(exc)) from exc
 
             try:
                 actual_qty = int(line.get("actual_quantity", item.quantity))
@@ -115,7 +120,7 @@ def execute_supply_order_receive(
                 purchase_price=item.purchase_price,
                 initial_quantity=actual_qty,
                 current_quantity=actual_qty,
-                manufacture_date=None,
+                manufacture_date=manufacture_date,
                 expiration_date=exp_date,
                 is_active=True,
             )

@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Min, Sum
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -40,7 +41,7 @@ class ProductSerializer(serializers.ModelSerializer):
 class ProductBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
-        fields = ("id", "name", "sku")
+        fields = ("id", "name", "sku", "shelf_life_days")
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -68,6 +69,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "is_marked",
             "is_stackable",
             "allowed_equipment_types",
+            "shelf_life_days",
         )
 
 
@@ -87,12 +89,14 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             "is_marked",
             "is_stackable",
             "allowed_equipment_types",
+            "shelf_life_days",
         )
         extra_kwargs = {
             "gtin": {"required": False, "allow_null": True, "allow_blank": True},
             "is_marked": {"required": False},
             "is_stackable": {"required": False},
             "allowed_equipment_types": {"required": False},
+            "shelf_life_days": {"required": False, "allow_null": True},
         }
 
     def validate_allowed_equipment_types(self, value):
@@ -157,6 +161,22 @@ class ProductCreateSerializer(serializers.ModelSerializer):
 
     def validate_weight(self, value: float) -> float:
         return self._validate_positive(value, "Вес")
+
+    def validate_shelf_life_days(self, value):
+        if value in (None, ""):
+            return None
+        days = int(value)
+        if days < 1:
+            raise serializers.ValidationError("Срок годности должен быть не меньше 1 дня.")
+        return days
+
+    def update(self, instance, validated_data):
+        from .spatial_engine import refresh_slot_max_capacity
+
+        instance = super().update(instance, validated_data)
+        for planogram in Planogram.objects.filter(product=instance).select_related("slot"):
+            refresh_slot_max_capacity(planogram.slot, instance)
+        return instance
 
 
 class EquipmentBriefSerializer(serializers.ModelSerializer):
@@ -495,16 +515,20 @@ class PlanogramWriteSerializer(serializers.ModelSerializer):
                 if hasattr(slot, "equipment") and slot.equipment_id
                 else Equipment.objects.filter(pk=slot.equipment_id).first()
             )
+            from .equipment_profiles import normalize_equipment_type
+
             allowed = product.allowed_equipment_types or []
             if allowed and equipment is not None:
-                eq_type = str(equipment.type)
-                if eq_type not in allowed:
+                eq_type = normalize_equipment_type(str(equipment.type))
+                allowed_norm = {normalize_equipment_type(str(a)) for a in allowed}
+                if eq_type not in allowed_norm:
                     raise serializers.ValidationError(
                         "Товар не предназначен для этого типа оборудования."
                     )
             if (
                 equipment is not None
-                and str(equipment.type) == Equipment.EquipmentType.MANNEQUIN
+                and normalize_equipment_type(str(equipment.type))
+                == Equipment.EquipmentType.MANNEQUIN
                 and target_quantity is not None
                 and int(target_quantity) > 1
             ):
@@ -587,12 +611,13 @@ class ProductBatchSerializer(serializers.ModelSerializer):
     is_expired = serializers.SerializerMethodField()
     quantity = serializers.IntegerField(write_only=True, required=False, min_value=1)
     expiry_date = serializers.DateField(write_only=True, required=False)
+    manufacture_date = serializers.DateField(required=False, allow_null=True)
 
     class Meta:
         model = ProductBatch
         fields = "__all__"
         extra_kwargs = {
-            # Заполняются из quantity / expiry_date в validate() при приёмке
+            # Заполняются из quantity / manufacture_date в validate() при приёмке
             "initial_quantity": {"required": False},
             "current_quantity": {"required": False},
             "expiration_date": {"required": False},
@@ -611,6 +636,8 @@ class ProductBatchSerializer(serializers.ModelSerializer):
         return obj.is_expired
 
     def validate(self, attrs):
+        from .batch_expiry import batch_dates_for_receiving, product_tracks_expiry
+
         quantity = attrs.get("quantity")
         expiry_date = attrs.get("expiry_date")
         if quantity is not None:
@@ -622,8 +649,21 @@ class ProductBatchSerializer(serializers.ModelSerializer):
         if self.instance is None:
             if attrs.get("initial_quantity") is None or attrs.get("current_quantity") is None:
                 raise serializers.ValidationError("Укажите quantity (количество партии).")
+            product = attrs.get("product")
+            if product is None:
+                raise serializers.ValidationError("Укажите product.")
+            manufacture_date = attrs.get("manufacture_date")
             if attrs.get("expiration_date") is None:
-                raise serializers.ValidationError("Укажите expiry_date (срок годности).")
+                try:
+                    mfg, exp = batch_dates_for_receiving(product, manufacture_date)
+                except ValueError as exc:
+                    if product_tracks_expiry(product):
+                        raise serializers.ValidationError(
+                            {"manufacture_date": "Укажите дату производства."}
+                        ) from exc
+                    raise serializers.ValidationError(str(exc)) from exc
+                attrs["manufacture_date"] = mfg
+                attrs["expiration_date"] = exp
             if attrs.get("purchase_price") is None:
                 attrs["purchase_price"] = 0
         return attrs
@@ -817,12 +857,18 @@ class SupplyOrderCreateSerializer(serializers.ModelSerializer):
 
 class ReceivingCompleteLineSerializer(serializers.Serializer):
     item_id = serializers.IntegerField()
-    expiration_date = serializers.DateField()
+    manufacture_date = serializers.DateField(required=False, allow_null=True)
     actual_quantity = serializers.IntegerField(min_value=0)
     discrepancy_note = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate(self, attrs):
-        order_item = SupplyOrderItem.objects.filter(pk=attrs["item_id"]).first()
+        from .batch_expiry import product_tracks_expiry
+
+        order_item = (
+            SupplyOrderItem.objects.select_related("product")
+            .filter(pk=attrs["item_id"])
+            .first()
+        )
         if order_item is None:
             return attrs
         actual = attrs["actual_quantity"]
@@ -830,6 +876,19 @@ class ReceivingCompleteLineSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"discrepancy_note": "Обязательно при расхождении с заказанным количеством."}
             )
+        product = order_item.product
+        manufacture_date = attrs.get("manufacture_date")
+        if product_tracks_expiry(product):
+            if manufacture_date is None:
+                raise serializers.ValidationError(
+                    {"manufacture_date": "Укажите дату производства."}
+                )
+            if manufacture_date > timezone.now().date():
+                raise serializers.ValidationError(
+                    {"manufacture_date": "Дата производства не может быть в будущем."}
+                )
+        else:
+            attrs["manufacture_date"] = None
         return attrs
 
 
@@ -923,7 +982,19 @@ class EquipmentSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, attrs):
+        from .equipment_profiles import validate_row_slot_layouts
+
         instance = getattr(self, "instance", None)
+
+        if "row_slot_layouts" in attrs:
+            rows = attrs.get(
+                "rows_count",
+                instance.rows_count if instance is not None else 0,
+            )
+            error = validate_row_slot_layouts(attrs["row_slot_layouts"], int(rows or 0))
+            if error:
+                raise serializers.ValidationError({"row_slot_layouts": error})
+
         if instance is None:
             return attrs
 
@@ -935,7 +1006,13 @@ class EquipmentSerializer(serializers.ModelSerializer):
 
         new_type = attrs.get("type", instance.type)
         new_rows = attrs.get("rows_count", instance.rows_count)
-        if layout_fields_changed(instance, new_type=new_type, new_rows_count=new_rows):
+        new_layouts = attrs.get("row_slot_layouts", instance.row_slot_layouts)
+        if layout_fields_changed(
+            instance,
+            new_type=new_type,
+            new_rows_count=new_rows,
+            new_row_slot_layouts=new_layouts,
+        ):
             if equipment_has_blocking_stock_or_tasks(instance):
                 raise serializers.ValidationError(LAYOUT_CHANGE_BLOCKED_MSG)
         return attrs
@@ -945,10 +1022,12 @@ class EquipmentSerializer(serializers.ModelSerializer):
 
         new_type = validated_data.get("type", instance.type)
         new_rows = validated_data.get("rows_count", instance.rows_count)
+        new_layouts = validated_data.get("row_slot_layouts", instance.row_slot_layouts)
         should_resync = layout_fields_changed(
             instance,
             new_type=new_type,
             new_rows_count=new_rows,
+            new_row_slot_layouts=new_layouts,
         )
 
         instance = super().update(instance, validated_data)
