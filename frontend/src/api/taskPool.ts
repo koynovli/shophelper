@@ -1,3 +1,9 @@
+export type MapTaskHighlight = {
+  equipmentId: number;
+  slotId?: number | null;
+  taskId?: string | null;
+};
+
 export type TaskPoolItem = {
   task_type: 'placement' | 'staff' | 'receiving';
   id: string;
@@ -9,6 +15,7 @@ export type TaskPoolItem = {
   product?: { id: number; name: string; sku: string };
   equipment?: { id: number; name: string } | null;
   quantity?: number;
+  slot_info?: { id: number; row_index: number; col_index: number } | null;
   slot_verified?: boolean;
   photo_url?: string | null;
   description?: string;

@@ -25,6 +25,7 @@ import {
 } from 'react-zoom-pan-pinch';
 
 import api from '../api';
+import type { MapTaskHighlight } from '../api/taskPool';
 import type { AxiosError } from 'axios';
 import { useMapEditMode } from '../map/MapEditModeContext';
 import type {
@@ -209,11 +210,19 @@ function MapZoomToolbar() {
 
 type StoreMapProps = {
   highlightEquipmentId?: number | null;
+  highlightTarget?: MapTaskHighlight | null;
   onHighlightConsumed?: () => void;
+  viewerMode?: 'admin' | 'employee';
 };
 
-function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMapProps): React.ReactElement {
+function StoreMap({
+  highlightEquipmentId = null,
+  highlightTarget = null,
+  onHighlightConsumed,
+  viewerMode = 'admin',
+}: StoreMapProps): React.ReactElement {
   const { isEditMode } = useMapEditMode();
+  const isEmployeeView = viewerMode === 'employee';
   const [zones, setZones] = useState<FloorZone[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [dimensions, setDimensions] = useState({ width: 20, height: 15 });
@@ -252,6 +261,8 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
   const [minScale, setMinScale] = useState(0.05);
   const [pendingTaskEquipmentIds, setPendingTaskEquipmentIds] = useState<Set<number>>(new Set());
   const [pendingSlotIds, setPendingSlotIds] = useState<Set<number>>(new Set());
+  const [focusedSlotId, setFocusedSlotId] = useState<number | null>(null);
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const mapBoardRef = useRef<HTMLDivElement>(null);
@@ -266,6 +277,11 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
   const selectEquipmentId = useCallback((id: number | null): void => {
     selectedEquipmentIdRef.current = id;
     setSelectedEquipmentId(id);
+  }, []);
+
+  const clearTaskFocus = useCallback((): void => {
+    setFocusedSlotId(null);
+    setFocusedTaskId(null);
   }, []);
 
   useEffect(() => {
@@ -1084,7 +1100,7 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
   }, [selectedSlot, merchEquipmentId, fetchMerchData]);
 
   const openMerchModal = useCallback(
-    (equipment: FloorEquipment): void => {
+    (equipment: FloorEquipment, preferredSlotId?: number | null): void => {
       setMerchEquipmentId(equipment.id);
       setMerchEquipmentName(equipment.name);
       const sortedSlots = [...(equipment.slots ?? [])].sort((a, b) =>
@@ -1092,12 +1108,38 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
           ? a.col_index - b.col_index
           : a.row_index - b.row_index,
       );
-      setSelectedSlotId(sortedSlots[0]?.id ?? null);
+      const slotId =
+        preferredSlotId != null && sortedSlots.some((s) => s.id === preferredSlotId)
+          ? preferredSlotId
+          : sortedSlots[0]?.id ?? null;
+      setSelectedSlotId(slotId);
       setMerchOpen(true);
       void fetchMerchData(equipment.id);
     },
     [fetchMerchData],
   );
+
+  useEffect(() => {
+    if (highlightTarget == null) {
+      return;
+    }
+    const equipment = zonesRef.current
+      .flatMap((z) => z.equipment)
+      .find((eq) => eq.id === highlightTarget.equipmentId);
+    if (!equipment) {
+      return;
+    }
+    selectEquipmentId(highlightTarget.equipmentId);
+    if (highlightTarget.slotId != null) {
+      setFocusedSlotId(highlightTarget.slotId);
+      setSelectedSlotId(highlightTarget.slotId);
+    }
+    if (highlightTarget.taskId) {
+      setFocusedTaskId(highlightTarget.taskId);
+    }
+    openMerchModal(equipment, highlightTarget.slotId);
+    onHighlightConsumed?.();
+  }, [highlightTarget, zones, selectEquipmentId, openMerchModal, onHighlightConsumed]);
 
   useEffect(() => {
     if (!selectedSlot?.planogram) {
@@ -1367,6 +1409,17 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
 
   return (
     <section className="flex min-h-0 w-full flex-col gap-3">
+      {isEmployeeView ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Размеры зала (м)
+          </span>
+          <span className="text-slate-400">
+            {dimensions.width} × {dimensions.height}
+          </span>
+        </div>
+      ) : (
+        <>
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-sm text-slate-300 shadow-lg backdrop-blur-sm">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           Размеры зала (м)
@@ -1456,6 +1509,8 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
           Текущий режим: <span className="font-semibold text-slate-200">{editorMode}</span>
         </span>
       </div>
+        </>
+      )}
 
       <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1">
@@ -1554,13 +1609,16 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                         zoneColorHex={zone.color}
                         pxPerCm={PX_PER_CM}
                         pendingSlotIds={effectivePendingSlotIds}
+                        focusedSlotId={focusedSlotId}
                         selected={selectedEquipmentId === eq.id}
                         selectedSlotId={selectedSlotId}
                         onEquipmentClick={(item) => {
+                          clearTaskFocus();
                           selectEquipmentId(item.id);
                           openMerchModal(item);
                         }}
                         onSlotClick={(item, slot) => {
+                          clearTaskFocus();
                           selectEquipmentId(item.id);
                           setMerchEquipmentId(item.id);
                           setMerchEquipmentName(item.name);
@@ -1568,7 +1626,10 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
                           setSelectedSlotId(slot.id);
                           void fetchMerchData(item.id);
                         }}
-                        onDoubleClick={(item) => openMerchModal(item)}
+                        onDoubleClick={(item) => {
+                          clearTaskFocus();
+                          openMerchModal(item);
+                        }}
                       />
                     )),
                   )
@@ -1587,7 +1648,9 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
           ) : null}
           {!isEditMode ? (
             <span className="mt-1 block text-sky-200/90">
-              Режим мерчандайзинга: double click — планограмма и задачи · перетаскивание отключено
+              {isEmployeeView
+                ? 'Просмотр карты: задачи на выкладку подсвечены · редактирование недоступно'
+                : 'Режим мерчандайзинга: double click — планограмма и задачи · перетаскивание отключено'}
             </span>
           ) : null}
         </div>
@@ -1918,12 +1981,18 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
         equipmentName={merchEquipmentName}
         slotsSorted={merchSlotsSorted}
         selectedSlotId={selectedSlotId}
-        onSelectSlot={setSelectedSlotId}
+        onSelectSlot={(id) => {
+          if (id !== focusedSlotId) {
+            clearTaskFocus();
+          }
+          setSelectedSlotId(id);
+        }}
         onClose={() => {
           setMerchOpen(false);
           setMerchEquipmentId(null);
           setSelectedSlotId(null);
           setMerchFeedback(null);
+          clearTaskFocus();
           void loadPendingTaskEquipmentIds();
         }}
         merchLoading={merchLoading}
@@ -1940,6 +2009,9 @@ function StoreMap({ highlightEquipmentId = null, onHighlightConsumed }: StoreMap
         onSavePlanogram={() => void handleAddPlanogram()}
         onSimulateSale={() => void handleSimulateSale()}
         onDeletePlanogram={() => void handleDeletePlanogram()}
+        readOnly={isEmployeeView}
+        highlightTaskId={focusedTaskId}
+        focusedSlotId={focusedSlotId}
       />
     </section>
   );

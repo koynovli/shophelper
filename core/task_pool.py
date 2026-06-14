@@ -19,6 +19,17 @@ def _placement_destination(task: PlacementTask) -> str:
     return task.equipment.name
 
 
+def _placement_slot_info(task: PlacementTask) -> dict | None:
+    if task.planogram_id is None or task.planogram.slot_id is None:
+        return None
+    slot = task.planogram.slot
+    return {
+        "id": slot.id,
+        "row_index": slot.row_index,
+        "col_index": slot.col_index,
+    }
+
+
 def _placement_to_dto(task: PlacementTask) -> dict:
     assigned = None
     if task.assigned_to_id:
@@ -40,6 +51,7 @@ def _placement_to_dto(task: PlacementTask) -> dict:
         },
         "equipment": {"id": task.equipment_id, "name": task.equipment.name},
         "quantity": task.quantity,
+        "slot_info": _placement_slot_info(task),
         "slot_verified": task.slot_verified_at is not None,
         "photo_url": task.photo_url,
         "has_chat": True,

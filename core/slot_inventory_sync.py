@@ -36,20 +36,37 @@ def sync_slot_qty_from_inventory(inventory: Inventory) -> None:
 
 
 def sync_inventory_from_slot(slot: EquipmentSlot, product_id: int, store_id: int) -> None:
-    """Поддержка product-tracking: одна строка SHELF на полку+товар = current_qty слота."""
+    """Поддержка product-tracking: одна строка SHELF без партии на store+product = current_qty слота."""
     shelf = resolve_shelf_for_slot(slot)
     if shelf is None:
         return
-    inv, _ = Inventory.objects.get_or_create(
+    qty = int(slot.current_qty)
+    inv = Inventory.objects.filter(
         store_id=store_id,
         product_id=product_id,
-        shelf_id=shelf.pk,
-        status=Inventory.LocationStatus.SHELF,
-        defaults={"quantity": 0},
-    )
-    if int(inv.quantity) != int(slot.current_qty):
-        inv.quantity = int(slot.current_qty)
-        inv.save(update_fields=["quantity"])
+        batch__isnull=True,
+    ).first()
+    if inv is None:
+        Inventory.objects.create(
+            store_id=store_id,
+            product_id=product_id,
+            shelf=shelf,
+            status=Inventory.LocationStatus.SHELF,
+            quantity=qty,
+        )
+        return
+    update_fields: list[str] = []
+    if inv.shelf_id != shelf.pk:
+        inv.shelf = shelf
+        update_fields.append("shelf")
+    if inv.status != Inventory.LocationStatus.SHELF:
+        inv.status = Inventory.LocationStatus.SHELF
+        update_fields.append("status")
+    if int(inv.quantity) != qty:
+        inv.quantity = qty
+        update_fields.append("quantity")
+    if update_fields:
+        inv.save(update_fields=update_fields)
 
 
 def link_slots_to_shelf(shelf: Shelf) -> None:

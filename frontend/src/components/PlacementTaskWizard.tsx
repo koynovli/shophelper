@@ -1,32 +1,76 @@
 import React, { useState } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, QrCode, Send } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, Send } from 'lucide-react';
 import type { AxiosError } from 'axios';
 
 import api from '../api';
-import type { TaskPoolItem } from '../api/taskPool';
+import type { MapTaskHighlight, TaskPoolItem } from '../api/taskPool';
 import { usePlacementTaskChat } from '../hooks/usePlacementTaskChat';
 
 type Props = {
   task: TaskPoolItem;
   onDone: () => void;
+  onShowOnMap?: (target: MapTaskHighlight) => void;
 };
 
-export function PlacementTaskWizard({ task, onDone }: Props): React.ReactElement {
+export function PlacementTaskWizard({
+  task,
+  onDone,
+  onShowOnMap,
+}: Props): React.ReactElement {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [qrInput, setQrInput] = useState('');
   const [localStatus, setLocalStatus] = useState(task.status);
-  const [slotVerified, setSlotVerified] = useState(Boolean(task.slot_verified));
   const [chatText, setChatText] = useState('');
   const { messages, send: sendChat } = usePlacementTaskChat({
     taskId: task.id,
     enabled: localStatus === 'IN_PROGRESS',
   });
 
+  const extractErrorMessage = (err: unknown, fallback: string): string => {
+    const ax = err as AxiosError<{ detail?: unknown }>;
+    const data = ax.response?.data;
+    if (!data) {
+      return fallback;
+    }
+    const { detail } = data;
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail;
+    }
+    if (Array.isArray(detail)) {
+      const parts = detail
+        .map((item) => {
+          if (typeof item === 'string') {
+            return item;
+          }
+          if (item && typeof item === 'object' && 'detail' in item) {
+            return String((item as { detail?: unknown }).detail ?? '');
+          }
+          return '';
+        })
+        .filter(Boolean);
+      if (parts.length > 0) {
+        return parts.join(' ');
+      }
+    }
+    if (detail && typeof detail === 'object') {
+      const parts = Object.entries(detail as Record<string, unknown>).flatMap(([key, value]) => {
+        if (Array.isArray(value)) {
+          return value.map((v) => `${key}: ${String(v)}`);
+        }
+        if (typeof value === 'string') {
+          return [`${key}: ${value}`];
+        }
+        return [];
+      });
+      if (parts.length > 0) {
+        return parts.join(' ');
+      }
+    }
+    return fallback;
+  };
+
   const handleError = (err: unknown, fallback: string): void => {
-    const ax = err as AxiosError<{ detail?: string }>;
-    const detail = ax.response?.data?.detail;
-    setError(typeof detail === 'string' ? detail : fallback);
+    setError(extractErrorMessage(err, fallback));
   };
 
   const accept = async (): Promise<void> => {
@@ -37,21 +81,6 @@ export function PlacementTaskWizard({ task, onDone }: Props): React.ReactElement
       setLocalStatus('IN_PROGRESS');
     } catch (err) {
       handleError(err, 'Не удалось взять задачу.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const verifySlot = async (): Promise<void> => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/placement-tasks/${task.id}/verify-slot/`, {
-        qr_token: qrInput.trim(),
-      });
-      setSlotVerified(true);
-    } catch (err) {
-      handleError(err, 'QR-код не принят.');
     } finally {
       setBusy(false);
     }
@@ -72,15 +101,11 @@ export function PlacementTaskWizard({ task, onDone }: Props): React.ReactElement
     }
   };
 
-  const complete = async (file: File): Promise<void> => {
+  const complete = async (): Promise<void> => {
     setBusy(true);
     setError(null);
     try {
-      const form = new FormData();
-      form.append('photo', file);
-      await api.post(`/placement-tasks/${task.id}/complete/`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      await api.post(`/placement-tasks/${task.id}/complete/`);
       onDone();
     } catch (err) {
       handleError(err, 'Не удалось завершить задачу.');
@@ -109,47 +134,38 @@ export function PlacementTaskWizard({ task, onDone }: Props): React.ReactElement
         </button>
       ) : null}
 
-      {localStatus === 'IN_PROGRESS' && !slotVerified ? (
-        <div className="space-y-2">
-          <label className="flex items-center gap-2 text-xs text-slate-400">
-            <QrCode className="h-4 w-4" aria-hidden />
-            UUID с QR-кода полки
-          </label>
-          <input
-            value={qrInput}
-            onChange={(e) => setQrInput(e.target.value)}
-            placeholder="550e8400-e29b-41d4-a716-446655440000"
-            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
-          />
+      {localStatus === 'IN_PROGRESS' ? (
+        <>
           <button
             type="button"
-            disabled={busy || !qrInput.trim()}
-            onClick={() => void verifySlot()}
-            className="w-full rounded-xl border border-sky-500/60 bg-sky-900/40 px-4 py-2 text-sm font-medium text-sky-100 disabled:opacity-50"
-          >
-            Подтвердить полку
-          </button>
-        </div>
-      ) : null}
-
-      {localStatus === 'IN_PROGRESS' && slotVerified ? (
-        <label className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-emerald-500/50 bg-emerald-950/20 px-4 py-4 text-sm text-emerald-100">
-          <CheckCircle2 className="h-5 w-5" aria-hidden />
-          Загрузить фотоотчёт
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
             disabled={busy}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) {
-                void complete(file);
+            onClick={() => void complete()}
+            className="flex w-full min-h-[44px] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4" aria-hidden />
+            )}
+            Завершить выкладку
+          </button>
+          {task.equipment?.id && onShowOnMap ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                onShowOnMap({
+                  equipmentId: task.equipment!.id,
+                  slotId: task.slot_info?.id ?? null,
+                  taskId: task.id,
+                })
               }
-            }}
-          />
-        </label>
+              className="w-full rounded-xl border border-sky-500/60 bg-sky-900/40 px-4 py-2 text-sm font-medium text-sky-100 disabled:opacity-50"
+            >
+              На карте
+            </button>
+          ) : null}
+        </>
       ) : null}
 
       {localStatus === 'IN_PROGRESS' ? (

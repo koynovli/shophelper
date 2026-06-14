@@ -122,14 +122,9 @@ class MvpManifestTests(TestCase):
             status=PlacementTask.Status.IN_PROGRESS,
             assigned_to=self.employee,
         )
-        from django.utils import timezone
-
-        task.slot_verified_at = timezone.now()
-        task.save(update_fields=["slot_verified_at"])
         batch_before = int(self.batch.current_quantity)
         slot_before = int(self.slot.current_qty)
-        photo = SimpleUploadedFile("r.jpg", b"jpeg", content_type="image/jpeg")
-        complete_placement_task(task.pk, self.employee, photo)
+        complete_placement_task(task.pk, self.employee, None)
         self.batch.refresh_from_db()
         self.slot.refresh_from_db()
         task.refresh_from_db()

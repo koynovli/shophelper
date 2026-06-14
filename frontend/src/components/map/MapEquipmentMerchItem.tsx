@@ -11,6 +11,7 @@ type Props = {
   zoneColorHex: string;
   pxPerCm: number;
   pendingSlotIds: Set<number>;
+  focusedSlotId?: number | null;
   selected: boolean;
   selectedSlotId: number | null;
   onEquipmentClick: (equipment: FloorEquipment) => void;
@@ -63,6 +64,7 @@ export function MapEquipmentMerchItem({
   zoneColorHex,
   pxPerCm,
   pendingSlotIds,
+  focusedSlotId = null,
   selected,
   selectedSlotId,
   onEquipmentClick,
@@ -132,14 +134,17 @@ export function MapEquipmentMerchItem({
           }
           const visual = getSlotVisualState(slot, pendingSlotIds);
           const isSlotSelected = selectedSlotId === slot.id;
+          const isFocused = focusedSlotId === slot.id;
           return (
             <button
               key={slot.id}
               type="button"
               title={slotTooltip(slot)}
               className={`absolute box-border rounded-sm border transition hover:brightness-110 ${
-                visual.pulse ? 'animate-pulse' : ''
-              } ${isSlotSelected ? 'ring-2 ring-sky-300' : ''}`}
+                visual.pulse && !isFocused ? 'animate-pulse' : ''
+              } ${isFocused ? 'animate-pulse ring-4 ring-violet-400 ring-offset-1 ring-offset-slate-900' : ''} ${
+                isSlotSelected && !isFocused ? 'ring-2 ring-sky-300' : ''
+              }`}
               style={{
                 left: `${layout.x}px`,
                 top: `${layout.y}px`,
@@ -153,9 +158,14 @@ export function MapEquipmentMerchItem({
                 onSlotClick(equipment, slot);
               }}
             >
-              {visual.showAlert ? (
+              {visual.showAlert && !isFocused ? (
                 <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-amber-100">
                   !
+                </span>
+              ) : null}
+              {isFocused ? (
+                <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-violet-100">
+                  →
                 </span>
               ) : null}
             </button>

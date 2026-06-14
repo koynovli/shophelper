@@ -9,7 +9,11 @@ from django.utils import timezone
 
 from .media_upload import save_task_photo
 from .models import EquipmentSlot, PlacementTask
-from .placement_sync import deduct_from_batches, reconcile_planogram
+from .placement_sync import (
+    available_batch_qty,
+    deduct_from_batches,
+    reconcile_planogram,
+)
 from .slot_inventory_sync import sync_inventory_from_slot
 from .ws_broadcast import broadcast_task_pool
 
@@ -37,6 +41,15 @@ def _get_task_for_update(task_id: int) -> PlacementTask:
     )
 
 
+def _ensure_batch_availability(product_id: int, qty: int) -> None:
+    avail = available_batch_qty(product_id)
+    if avail < qty:
+        raise PlacementExecutionError(
+            f"На складе недостаточно годных партий (доступно {avail} из {qty}). "
+            "Проверьте приёмку или срок годности партий."
+        )
+
+
 def accept_placement_task(task_id: int, user: AbstractUser) -> PlacementTask:
     with transaction.atomic():
         task = _get_task_for_update(task_id)
@@ -44,6 +57,7 @@ def accept_placement_task(task_id: int, user: AbstractUser) -> PlacementTask:
             raise PlacementExecutionError("Задачу можно взять только в статусе CREATED.")
         if task.assigned_to_id and task.assigned_to_id != user.pk:
             raise PlacementExecutionError("Задача уже назначена другому сотруднику.")
+        _ensure_batch_availability(task.product_id, int(task.quantity))
         task.assigned_to = user
         task.status = PlacementTask.Status.IN_PROGRESS
         task.save(update_fields=["assigned_to", "status"])
@@ -77,16 +91,14 @@ def complete_placement_task(task_id: int, user: AbstractUser, photo_file) -> Pla
             raise PlacementExecutionError("Завершить можно только задачу IN_PROGRESS.")
         if task.assigned_to_id and task.assigned_to_id != user.pk:
             raise PlacementExecutionError("Задача назначена другому сотруднику.")
-        if task.slot_verified_at is None:
-            raise PlacementExecutionError("Сначала отсканируйте QR-код полки.")
-        if photo_file is None:
-            raise PlacementExecutionError("Фотоотчёт обязателен.")
 
         qty = int(task.quantity)
+        _ensure_batch_availability(task.product_id, qty)
         deducted, batch_id = deduct_from_batches(task.product_id, qty)
         if deducted < qty:
             raise PlacementExecutionError(
-                f"На складе недостаточно товара (доступно {deducted} из {qty})."
+                f"На складе недостаточно годных партий (доступно {deducted} из {qty}). "
+                "Проверьте приёмку или срок годности партий."
             )
 
         slot = EquipmentSlot.objects.select_for_update().get(pk=task.planogram.slot_id)
@@ -95,12 +107,14 @@ def complete_placement_task(task_id: int, user: AbstractUser, photo_file) -> Pla
         store_id = task.equipment.zone.store_id
         sync_inventory_from_slot(slot, task.product_id, store_id)
 
-        photo_url = save_task_photo(photo_file, prefix="placement_reports")
-        task.photo_url = photo_url
+        update_fields = ["batch", "status", "completed_at"]
+        if photo_file is not None:
+            task.photo_url = save_task_photo(photo_file, prefix="placement_reports")
+            update_fields.append("photo_url")
         task.batch_id = batch_id or task.batch_id
         task.status = PlacementTask.Status.COMPLETED
         task.completed_at = timezone.now()
-        task.save(update_fields=["photo_url", "batch", "status", "completed_at"])
+        task.save(update_fields=update_fields)
 
         if task.planogram_id:
             reconcile_planogram(task.planogram)

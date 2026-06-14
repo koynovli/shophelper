@@ -130,7 +130,26 @@ class ContourCTaskTests(TestCase):
         self.assertIn("placement", types)
         self.assertIn("staff", types)
 
-    def test_placement_verify_and_complete(self):
+    def test_task_pool_placement_includes_slot_info(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/task-pool/")
+        self.assertEqual(resp.status_code, 200)
+        placement = next(item for item in resp.data if item["task_type"] == "placement")
+        self.assertIsNotNone(placement.get("slot_info"))
+        self.assertEqual(placement["slot_info"]["id"], self.slot.pk)
+
+    def test_placement_accept_and_complete_without_qr_or_photo(self):
+        self.client.force_authenticate(self.employee)
+        accept = self.client.post(f"/api/placement-tasks/{self.placement.pk}/accept/")
+        self.assertEqual(accept.status_code, 200)
+
+        done = self.client.post(f"/api/placement-tasks/{self.placement.pk}/complete/")
+        self.assertEqual(done.status_code, 200)
+        self.placement.refresh_from_db()
+        self.assertEqual(self.placement.status, PlacementTask.Status.COMPLETED)
+        self.assertFalse(self.placement.photo_url)
+
+    def test_placement_verify_slot_still_works_but_optional(self):
         self.client.force_authenticate(self.employee)
         accept = self.client.post(f"/api/placement-tasks/{self.placement.pk}/accept/")
         self.assertEqual(accept.status_code, 200)
@@ -148,21 +167,8 @@ class ContourCTaskTests(TestCase):
             format="json",
         )
         self.assertEqual(ok_qr.status_code, 200)
-
-        photo = SimpleUploadedFile(
-            "proof.jpg",
-            BytesIO(b"fake-image").getvalue(),
-            content_type="image/jpeg",
-        )
-        done = self.client.post(
-            f"/api/placement-tasks/{self.placement.pk}/complete/",
-            {"photo": photo},
-            format="multipart",
-        )
-        self.assertEqual(done.status_code, 200)
         self.placement.refresh_from_db()
-        self.assertEqual(self.placement.status, PlacementTask.Status.COMPLETED)
-        self.assertTrue(self.placement.photo_url)
+        self.assertIsNotNone(self.placement.slot_verified_at)
 
     def test_staff_task_lifecycle(self):
         self.client.force_authenticate(self.admin)

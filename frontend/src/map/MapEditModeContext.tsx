@@ -26,27 +26,42 @@ function readStoredEditMode(): boolean {
 
 export function MapEditModeProvider({
   children,
+  viewOnly = false,
 }: {
   children: React.ReactNode;
+  viewOnly?: boolean;
 }): React.ReactElement {
-  const [isEditMode, setIsEditModeState] = useState<boolean>(readStoredEditMode);
+  const [isEditMode, setIsEditModeState] = useState<boolean>(
+    viewOnly ? false : readStoredEditMode,
+  );
 
-  const setEditMode = useCallback((value: boolean) => {
-    setIsEditModeState(value);
-    try {
-      localStorage.setItem(STORAGE_KEY, value ? 'true' : 'false');
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  const setEditMode = useCallback(
+    (value: boolean) => {
+      if (viewOnly) {
+        return;
+      }
+      setIsEditModeState(value);
+      try {
+        localStorage.setItem(STORAGE_KEY, value ? 'true' : 'false');
+      } catch {
+        /* ignore */
+      }
+    },
+    [viewOnly],
+  );
 
   const toggleEditMode = useCallback(() => {
+    if (viewOnly) {
+      return;
+    }
     setEditMode(!isEditMode);
-  }, [isEditMode, setEditMode]);
+  }, [viewOnly, isEditMode, setEditMode]);
+
+  const effectiveEditMode = viewOnly ? false : isEditMode;
 
   const value = useMemo(
-    () => ({ isEditMode, setEditMode, toggleEditMode }),
-    [isEditMode, setEditMode, toggleEditMode],
+    () => ({ isEditMode: effectiveEditMode, setEditMode, toggleEditMode }),
+    [effectiveEditMode, setEditMode, toggleEditMode],
   );
 
   return <MapEditModeContext.Provider value={value}>{children}</MapEditModeContext.Provider>;

@@ -797,7 +797,7 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
 class EquipmentSlotAdjustView(APIView):
     """Симуляция продажи/коррекции остатка на слоте (уменьшает current_qty)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsRoleAdmin]
 
     def post(self, request, pk: int):
         delta = int(request.data.get("delta", 0))

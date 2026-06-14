@@ -7,7 +7,7 @@ from .equipment_profiles import (
     shelf_dimensions_for_equipment,
 )
 from .models import Equipment, EquipmentSlot, Inventory, Planogram, ProductBatch, Shelf, StockItem
-from .placement_sync import reconcile_for_product, reconcile_planogram
+from .placement_sync import reconcile_for_product, reconcile_planogram, sync_stock_item_from_batches
 from .slot_inventory_sync import link_slots_to_shelf, sync_slot_qty_from_inventory
 
 
@@ -68,12 +68,8 @@ def shelf_saved(sender, instance: Shelf, **kwargs):
 
 
 @receiver(post_save, sender=ProductBatch)
-def product_batch_created(sender, instance: ProductBatch, created: bool, **kwargs):
-    if not created:
-        return
-    stock, _ = StockItem.objects.get_or_create(product=instance.product, defaults={"quantity": 0})
-    stock.quantity = int(stock.quantity) + int(instance.current_quantity)
-    stock.save(update_fields=["quantity"])
+def product_batch_saved(sender, instance: ProductBatch, **kwargs):
+    sync_stock_item_from_batches(instance.product_id)
 
 
 def _generate_default_slots_for_equipment(equipment: Equipment) -> None:

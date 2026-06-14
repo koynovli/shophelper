@@ -39,6 +39,19 @@ def available_batch_qty(product_id: int) -> int:
     return int(total or 0)
 
 
+def sync_stock_item_from_batches(product_id: int) -> int:
+    """Пересчитывает StockItem.quantity по доступным FEFO-партиям."""
+    qty = available_batch_qty(product_id)
+    stock, _ = StockItem.objects.get_or_create(
+        product_id=product_id,
+        defaults={"quantity": 0},
+    )
+    if int(stock.quantity) != qty:
+        stock.quantity = qty
+        stock.save(update_fields=["quantity"])
+    return qty
+
+
 def deduct_from_batches(product_id: int, requested_qty: int) -> tuple[int, int | None]:
     """FEFO-списание со склада (партии). Возвращает (списано, id основной партии)."""
     if requested_qty <= 0:
@@ -70,12 +83,7 @@ def deduct_from_batches(product_id: int, requested_qty: int) -> tuple[int, int |
         remaining -= take
         deducted += take
 
-    if deducted > 0:
-        stock = StockItem.objects.select_for_update().filter(product_id=product_id).first()
-        if stock is not None:
-            stock.quantity = max(0, int(stock.quantity) - deducted)
-            stock.save(update_fields=["quantity"])
-
+    sync_stock_item_from_batches(product_id)
     return deducted, primary_batch_id
 
 
@@ -131,10 +139,8 @@ def reconcile_planogram(planogram: Planogram) -> None:
             return
 
         batch_avail = available_batch_qty(pg.product_id)
-        stock = StockItem.objects.filter(product_id=pg.product_id).first()
-        stock_qty = int(stock.quantity) if stock else 0
-        effective = min(batch_avail, stock_qty) if batch_avail > 0 else stock_qty
-        add_qty = min(need_qty, effective)
+        stock_qty = sync_stock_item_from_batches(pg.product_id)
+        add_qty = min(need_qty, batch_avail, stock_qty)
         if add_qty <= 0:
             return
 

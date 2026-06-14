@@ -1,21 +1,27 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, LogOut, Package, User } from 'lucide-react';
+import { Loader2, LogOut, Map, Package, User } from 'lucide-react';
 import type { AxiosError } from 'axios';
 
 import api from '../api';
-import type { TaskPoolItem } from '../api/taskPool';
+import type { MapTaskHighlight, TaskPoolItem } from '../api/taskPool';
 import { poolStatusLabel, taskTypeLabel } from '../api/taskPool';
 import { useAuth } from '../auth/AuthContext';
 import { PlacementTaskWizard } from '../components/PlacementTaskWizard';
 import { StaffTaskWizard } from '../components/StaffTaskWizard';
 import { SupplyReceivingWizard } from '../components/SupplyReceivingWizard';
+import StoreMap from '../components/StoreMap';
 import { useStoreNotifications } from '../hooks/useStoreNotifications';
 import { useTaskPoolWebSocket } from '../hooks/useTaskPoolWebSocket';
+import { MapEditModeProvider } from '../map/MapEditModeContext';
+
+type EmployeeTab = 'tasks' | 'map';
 
 export function EmployeeDashboard(): React.ReactElement {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState<EmployeeTab>('tasks');
+  const [mapHighlight, setMapHighlight] = useState<MapTaskHighlight | null>(null);
   const [tasks, setTasks] = useState<TaskPoolItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -64,9 +70,16 @@ export function EmployeeDashboard(): React.ReactElement {
     navigate('/login', { replace: true });
   };
 
+  const showOnMap = (target: MapTaskHighlight): void => {
+    setMapHighlight(target);
+    setActiveTab('map');
+  };
+
+  const mainMaxWidth = activeTab === 'map' ? 'max-w-7xl' : 'max-w-xl';
+
   return (
     <div className="min-h-screen bg-slate-950 px-3 py-4 text-slate-100 sm:px-4 sm:py-6">
-      <header className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 sm:mb-6">
+      <header className={`mx-auto mb-4 flex w-full ${mainMaxWidth} items-center justify-between gap-3 sm:mb-6`}>
         <div className="flex min-w-0 items-center gap-2 text-sm text-slate-300">
           <User className="h-4 w-4 shrink-0 text-slate-500" aria-hidden />
           <span className="truncate">
@@ -84,7 +97,7 @@ export function EmployeeDashboard(): React.ReactElement {
         </button>
       </header>
 
-      <main className="mx-auto w-full max-w-xl">
+      <main className={`mx-auto w-full ${mainMaxWidth}`}>
         {toast ? (
           <div
             role="status"
@@ -93,89 +106,135 @@ export function EmployeeDashboard(): React.ReactElement {
             {toast}
           </div>
         ) : null}
-        <div className="mb-4 flex items-center gap-2 sm:mb-5">
-          <Package className="h-6 w-6 text-emerald-400" aria-hidden />
-          <div>
-            <h1 className="text-lg font-semibold leading-tight sm:text-xl">Мои задачи</h1>
-            <p className="text-xs text-slate-400 sm:text-sm">
-              Выкладка, приёмка заказов и поручения менеджера
-            </p>
-          </div>
+
+        <div className="mb-4 flex flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-900/50 p-2 sm:mb-5">
+          <button
+            type="button"
+            onClick={() => setActiveTab('tasks')}
+            className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+              activeTab === 'tasks'
+                ? 'bg-emerald-500/20 text-emerald-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <Package className="h-4 w-4" aria-hidden />
+            Задачи
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('map')}
+            className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+              activeTab === 'map'
+                ? 'bg-indigo-500/20 text-indigo-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <Map className="h-4 w-4" aria-hidden />
+            Карта зала
+          </button>
         </div>
 
-        {error ? (
-          <div
-            role="alert"
-            className="mb-4 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm text-rose-100"
-          >
-            {error}
-          </div>
-        ) : null}
+        {activeTab === 'tasks' ? (
+          <>
+            <div className="mb-4 flex items-center gap-2 sm:mb-5">
+              <Package className="h-6 w-6 text-emerald-400" aria-hidden />
+              <div>
+                <h1 className="text-lg font-semibold leading-tight sm:text-xl">Мои задачи</h1>
+                <p className="text-xs text-slate-400 sm:text-sm">
+                  Выкладка, приёмка заказов и поручения менеджера
+                </p>
+              </div>
+            </div>
 
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-slate-400">
-            <Loader2 className="h-8 w-8 animate-spin" aria-hidden />
-            <span className="text-sm">Загрузка…</span>
-          </div>
-        ) : tasks.length === 0 ? (
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-12 text-center text-sm text-slate-400">
-            Нет активных задач.
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-3 sm:gap-4">
-            {tasks.map((t) => (
-              <li key={`${t.task_type}-${t.id}`}>
-                <article
-                  onClick={() => setSelectedTaskId(t.id)}
-                  className={`cursor-pointer rounded-2xl border bg-slate-900/70 p-4 shadow-lg transition sm:p-5 ${
-                    selectedTaskId === t.id
-                      ? 'border-emerald-500/70 ring-1 ring-emerald-400/50'
-                      : 'border-slate-800 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span
-                      className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                        t.task_type === 'placement'
-                          ? 'bg-emerald-900/50 text-emerald-200'
-                          : t.task_type === 'receiving'
-                            ? 'bg-sky-900/50 text-sky-200'
-                            : 'bg-violet-900/50 text-violet-200'
+            {error ? (
+              <div
+                role="alert"
+                className="mb-4 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm text-rose-100"
+              >
+                {error}
+              </div>
+            ) : null}
+
+            {loading ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-slate-400">
+                <Loader2 className="h-8 w-8 animate-spin" aria-hidden />
+                <span className="text-sm">Загрузка…</span>
+              </div>
+            ) : tasks.length === 0 ? (
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-12 text-center text-sm text-slate-400">
+                Нет активных задач.
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-3 sm:gap-4">
+                {tasks.map((t) => (
+                  <li key={`${t.task_type}-${t.id}`}>
+                    <article
+                      onClick={() => setSelectedTaskId(t.id)}
+                      className={`cursor-pointer rounded-2xl border bg-slate-900/70 p-4 shadow-lg transition sm:p-5 ${
+                        selectedTaskId === t.id
+                          ? 'border-emerald-500/70 ring-1 ring-emerald-400/50'
+                          : 'border-slate-800 hover:border-slate-700'
                       }`}
                     >
-                      {taskTypeLabel(t.task_type)}
-                    </span>
-                    <span className="text-xs text-slate-500">
-                      {poolStatusLabel(t.status, t.task_type)}
-                    </span>
-                  </div>
-                  <h2 className="text-base font-semibold leading-snug text-slate-50 sm:text-lg">
-                    {t.title}
-                  </h2>
-                  {t.task_type === 'receiving' && t.planned_receiving_date ? (
-                    <p className="mt-1 text-xs text-sky-300">
-                      Плановая приёмка:{' '}
-                      {new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(
-                        new Date(t.planned_receiving_date),
-                      )}
-                    </p>
-                  ) : null}
-                  {t.destination ? (
-                    <p className="mt-2 text-sm text-slate-300">{t.destination}</p>
-                  ) : null}
-                  {selectedTaskId === t.id && t.task_type === 'placement' ? (
-                    <PlacementTaskWizard task={t} onDone={() => void loadPending()} />
-                  ) : null}
-                  {selectedTaskId === t.id && t.task_type === 'staff' ? (
-                    <StaffTaskWizard task={t} onDone={() => void loadPending()} />
-                  ) : null}
-                  {selectedTaskId === t.id && t.task_type === 'receiving' ? (
-                    <SupplyReceivingWizard task={t} onDone={() => void loadPending()} />
-                  ) : null}
-                </article>
-              </li>
-            ))}
-          </ul>
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                            t.task_type === 'placement'
+                              ? 'bg-emerald-900/50 text-emerald-200'
+                              : t.task_type === 'receiving'
+                                ? 'bg-sky-900/50 text-sky-200'
+                                : 'bg-violet-900/50 text-violet-200'
+                          }`}
+                        >
+                          {taskTypeLabel(t.task_type)}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          {poolStatusLabel(t.status, t.task_type)}
+                        </span>
+                      </div>
+                      <h2 className="text-base font-semibold leading-snug text-slate-50 sm:text-lg">
+                        {t.title}
+                      </h2>
+                      {t.task_type === 'receiving' && t.planned_receiving_date ? (
+                        <p className="mt-1 text-xs text-sky-300">
+                          Плановая приёмка:{' '}
+                          {new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(
+                            new Date(t.planned_receiving_date),
+                          )}
+                        </p>
+                      ) : null}
+                      {t.destination ? (
+                        <p className="mt-2 text-sm text-slate-300">{t.destination}</p>
+                      ) : null}
+                      {selectedTaskId === t.id && t.task_type === 'placement' ? (
+                        <PlacementTaskWizard
+                          task={t}
+                          onDone={() => void loadPending()}
+                          onShowOnMap={showOnMap}
+                        />
+                      ) : null}
+                      {selectedTaskId === t.id && t.task_type === 'staff' ? (
+                        <StaffTaskWizard task={t} onDone={() => void loadPending()} />
+                      ) : null}
+                      {selectedTaskId === t.id && t.task_type === 'receiving' ? (
+                        <SupplyReceivingWizard task={t} onDone={() => void loadPending()} />
+                      ) : null}
+                    </article>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : (
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-3 shadow-lg sm:p-4">
+            <MapEditModeProvider viewOnly>
+              <StoreMap
+                viewerMode="employee"
+                highlightTarget={mapHighlight}
+                onHighlightConsumed={() => setMapHighlight(null)}
+              />
+            </MapEditModeProvider>
+          </div>
         )}
       </main>
     </div>
