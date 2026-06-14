@@ -10,32 +10,16 @@ from .equipment_profiles import (
     needs_shelves,
     shelf_dimensions_for_equipment,
 )
-from .models import Equipment, EquipmentSlot, Inventory, Planogram, PlacementTask, Shelf
+from .models import Equipment, EquipmentSlot, Inventory, Planogram, Shelf
 from .slot_inventory_sync import link_slots_to_shelf
 
 
-LAYOUT_CHANGE_BLOCKED_MSG = (
-    "Нельзя изменить тип/ряды: на оборудовании есть товар или активная задача выкладки."
+from .equipment_modification_guard import (  # noqa: F401 — re-export
+    LAYOUT_CHANGE_BLOCKED_MSG,
+    equipment_has_blocking_stock_or_tasks,
 )
 
 _UNSET = object()
-
-
-def equipment_has_blocking_stock_or_tasks(equipment: Equipment) -> bool:
-    if EquipmentSlot.objects.filter(equipment=equipment, current_qty__gt=0).exists():
-        return True
-
-    if Inventory.objects.filter(
-        shelf__equipment=equipment,
-        status=Inventory.LocationStatus.SHELF,
-        quantity__gt=0,
-    ).exists():
-        return True
-
-    return PlacementTask.objects.filter(
-        equipment=equipment,
-        status__in=(PlacementTask.Status.CREATED, PlacementTask.Status.PENDING),
-    ).exists()
 
 
 def _shelf_row_count(equipment: Equipment) -> int:

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, LogOut, Map, Package, User } from 'lucide-react';
+import { Loader2, LogOut, Map, Package, ScanLine, User } from 'lucide-react';
 import type { AxiosError } from 'axios';
 
 import api from '../api';
@@ -8,14 +8,19 @@ import type { MapTaskHighlight, TaskPoolItem } from '../api/taskPool';
 import { poolStatusLabel, taskTypeLabel } from '../api/taskPool';
 import { useAuth } from '../auth/AuthContext';
 import { PlacementTaskWizard } from '../components/PlacementTaskWizard';
+import { ShelfClearingTaskWizard } from '../components/ShelfClearingTaskWizard';
+import { WriteOffTaskWizard } from '../components/WriteOffTaskWizard';
 import { StaffTaskWizard } from '../components/StaffTaskWizard';
 import { SupplyReceivingWizard } from '../components/SupplyReceivingWizard';
+import { FloorScanPanel } from '../components/scan/FloorScanPanel';
+import { PickingListPanel } from '../components/scan/PickingListPanel';
+import { ScanVerifyPanel } from '../components/scan/ScanVerifyPanel';
 import StoreMap from '../components/StoreMap';
 import { useStoreNotifications } from '../hooks/useStoreNotifications';
 import { useTaskPoolWebSocket } from '../hooks/useTaskPoolWebSocket';
 import { MapEditModeProvider } from '../map/MapEditModeContext';
 
-type EmployeeTab = 'tasks' | 'map';
+type EmployeeTab = 'tasks' | 'placement' | 'map';
 
 export function EmployeeDashboard(): React.ReactElement {
   const { user, logout } = useAuth();
@@ -75,7 +80,8 @@ export function EmployeeDashboard(): React.ReactElement {
     setActiveTab('map');
   };
 
-  const mainMaxWidth = activeTab === 'map' ? 'max-w-7xl' : 'max-w-xl';
+  const mainMaxWidth =
+    activeTab === 'map' ? 'max-w-7xl' : activeTab === 'placement' ? 'max-w-xl' : 'max-w-xl';
 
   return (
     <div className="min-h-screen bg-slate-950 px-3 py-4 text-slate-100 sm:px-4 sm:py-6">
@@ -122,6 +128,18 @@ export function EmployeeDashboard(): React.ReactElement {
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab('placement')}
+            className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+              activeTab === 'placement'
+                ? 'bg-amber-500/20 text-amber-200'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+          >
+            <ScanLine className="h-4 w-4" aria-hidden />
+            Выкладка
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('map')}
             className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
               activeTab === 'map'
@@ -141,7 +159,7 @@ export function EmployeeDashboard(): React.ReactElement {
               <div>
                 <h1 className="text-lg font-semibold leading-tight sm:text-xl">Мои задачи</h1>
                 <p className="text-xs text-slate-400 sm:text-sm">
-                  Выкладка, приёмка заказов и поручения менеджера
+                  Выкладка, приёмка, списание и поручения менеджера
                 </p>
               </div>
             </div>
@@ -183,7 +201,11 @@ export function EmployeeDashboard(): React.ReactElement {
                               ? 'bg-emerald-900/50 text-emerald-200'
                               : t.task_type === 'receiving'
                                 ? 'bg-sky-900/50 text-sky-200'
-                                : 'bg-violet-900/50 text-violet-200'
+                                : t.task_type === 'shelf_clearing'
+                                  ? 'bg-amber-900/50 text-amber-200'
+                                  : t.task_type === 'write_off'
+                                    ? 'bg-rose-900/50 text-rose-200'
+                                    : 'bg-violet-900/50 text-violet-200'
                           }`}
                         >
                           {taskTypeLabel(t.task_type)}
@@ -219,12 +241,33 @@ export function EmployeeDashboard(): React.ReactElement {
                       {selectedTaskId === t.id && t.task_type === 'receiving' ? (
                         <SupplyReceivingWizard task={t} onDone={() => void loadPending()} />
                       ) : null}
+                      {selectedTaskId === t.id && t.task_type === 'shelf_clearing' ? (
+                        <ShelfClearingTaskWizard task={t} onDone={() => void loadPending()} />
+                      ) : null}
+                      {selectedTaskId === t.id && t.task_type === 'write_off' ? (
+                        <WriteOffTaskWizard task={t} onDone={() => void loadPending()} />
+                      ) : null}
                     </article>
                   </li>
                 ))}
               </ul>
             )}
           </>
+        ) : activeTab === 'placement' ? (
+          <div className="space-y-4">
+            <div className="mb-2 flex items-center gap-2">
+              <ScanLine className="h-6 w-6 text-amber-400" aria-hidden />
+              <div>
+                <h1 className="text-lg font-semibold leading-tight sm:text-xl">Сбор и выкладка</h1>
+                <p className="text-xs text-slate-400 sm:text-sm">
+                  Список для тележки, проверка кодов на складе и подсказка «куда» в зале
+                </p>
+              </div>
+            </div>
+            <PickingListPanel />
+            <ScanVerifyPanel />
+            <FloorScanPanel />
+          </div>
         ) : (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-3 shadow-lg sm:p-4">
             <MapEditModeProvider viewOnly>

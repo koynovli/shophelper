@@ -51,6 +51,10 @@ import {
 } from '../utils/floorPlanGeometry';
 import { useStoreNotifications } from '../hooks/useStoreNotifications';
 import { EquipmentDetailPanel } from './map/EquipmentDetailPanel';
+import {
+  EquipmentModificationModal,
+  type EquipmentModificationInfo,
+} from './map/EquipmentModificationModal';
 import { MapEquipmentMerchItem } from './map/MapEquipmentMerchItem';
 import { MapEquipmentItem } from './MapEquipmentItem';
 
@@ -144,6 +148,26 @@ type MerchTaskRow = {
   equipment: { id: number; name: string };
   slot_info?: { id: number; row_index: number; col_index: number } | null;
 };
+
+function equipmentLayoutWouldChange(
+  equipment: FloorEquipment,
+  form: {
+    type: FloorEquipmentType;
+    rowsCount: number;
+    rowSlotLayouts: RowSlotLayout[];
+  },
+): boolean {
+  const typeChanged =
+    normalizeEquipmentTypeValue(String(equipment.type)) !== form.type;
+  const rowsChanged = (equipment.rows_count ?? 0) !== form.rowsCount;
+  const nextLayouts =
+    supportsCustomSlots(form.type) && showsRowsField(form.type)
+      ? form.rowSlotLayouts
+      : [];
+  const layoutsChanged =
+    JSON.stringify(equipment.row_slot_layouts ?? []) !== JSON.stringify(nextLayouts);
+  return typeChanged || rowsChanged || layoutsChanged;
+}
 
 type WheelConfig = {
   step?: number;
@@ -263,6 +287,15 @@ function StoreMap({
   const [pendingSlotIds, setPendingSlotIds] = useState<Set<number>>(new Set());
   const [focusedSlotId, setFocusedSlotId] = useState<number | null>(null);
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [merchClearingTasks, setMerchClearingTasks] = useState<MerchTaskRow[]>([]);
+  const [modificationModalOpen, setModificationModalOpen] = useState(false);
+  const [modificationModalMode, setModificationModalMode] = useState<'delete' | 'layout'>(
+    'delete',
+  );
+  const [modificationInfo, setModificationInfo] = useState<EquipmentModificationInfo | null>(
+    null,
+  );
+  const [modificationEquipmentName, setModificationEquipmentName] = useState('');
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const mapBoardRef = useRef<HTMLDivElement>(null);
@@ -846,6 +879,18 @@ function StoreMap({
           selectEquipmentId(createdEquipment.id);
         }
       } else if (selectedEquipmentId) {
+        const currentEquipment = zonesRef.current
+          .flatMap((z) => z.equipment)
+          .find((eq) => eq.id === selectedEquipmentId);
+        if (
+          currentEquipment &&
+          equipmentLayoutWouldChange(currentEquipment, newEquipmentForm)
+        ) {
+          const info = await fetchModificationInfo(selectedEquipmentId);
+          if (showModificationBlocked('layout', currentEquipment, info)) {
+            return;
+          }
+        }
         await api.patch(`/floor-equipment/${selectedEquipmentId}/`, payload);
         const freshEquipment = await refreshEquipmentFromServer(selectedEquipmentId);
         if (merchOpen && merchEquipmentId === selectedEquipmentId) {
@@ -933,13 +978,38 @@ function StoreMap({
     [pushUndoSnapshot],
   );
 
+  const fetchModificationInfo = useCallback(
+    async (equipmentId: number): Promise<EquipmentModificationInfo> => {
+      const { data } = await api.get<EquipmentModificationInfo>(
+        `/floor-equipment/${equipmentId}/modification-info/`,
+      );
+      return data;
+    },
+    [],
+  );
+
+  const showModificationBlocked = useCallback(
+    (mode: 'delete' | 'layout', equipment: FloorEquipment, info: EquipmentModificationInfo) => {
+      const blocked = mode === 'delete' ? !info.can_delete : !info.can_modify_layout;
+      if (!blocked) {
+        return false;
+      }
+      setModificationModalMode(mode);
+      setModificationEquipmentName(equipment.name);
+      setModificationInfo(info);
+      setModificationModalOpen(true);
+      return true;
+    },
+    [],
+  );
+
   const deleteSelectedEquipment = useCallback(async (): Promise<void> => {
     const id = selectedEquipmentIdRef.current;
     if (!id) {
       return;
     }
-    const exists = zonesRef.current.flatMap((z) => z.equipment).some((e) => e.id === id);
-    if (!exists) {
+    const equipment = zonesRef.current.flatMap((z) => z.equipment).find((e) => e.id === id);
+    if (!equipment) {
       setIsModalOpen(false);
       return;
     }
@@ -947,6 +1017,10 @@ function StoreMap({
       return;
     }
     try {
+      const info = await fetchModificationInfo(id);
+      if (showModificationBlocked('delete', equipment, info)) {
+        return;
+      }
       pushUndoSnapshot();
       await api.delete(`/floor-equipment/${id}/`);
       setZones((prevZones) =>
@@ -957,9 +1031,11 @@ function StoreMap({
       resetNewEquipmentForm();
     } catch (error) {
       console.error('Ошибка удаления оборудования:', error);
-      alert('Не удалось удалить оборудование.');
+      const ax = error as AxiosError<{ detail?: string }>;
+      const detail = ax.response?.data?.detail;
+      alert(typeof detail === 'string' ? detail : 'Не удалось удалить оборудование.');
     }
-  }, [pushUndoSnapshot, selectEquipmentId]);
+  }, [fetchModificationInfo, pushUndoSnapshot, selectEquipmentId, showModificationBlocked]);
 
   const openEditModal = useCallback((equipment: FloorEquipment): void => {
     setModalMode('edit');
@@ -1043,11 +1119,21 @@ function StoreMap({
     setMerchLoading(true);
     setMerchFeedback(null);
     try {
-      const [taskRes, prodRes] = await Promise.all([
+      const [taskRes, clearingCreatedRes, clearingProgressRes, prodRes] = await Promise.all([
         api.get('/placement-tasks/', { params: { equipment: equipmentId, status: 'CREATED' } }),
+        api.get('/shelf-clearing-tasks/', {
+          params: { equipment: equipmentId, status: 'CREATED' },
+        }),
+        api.get('/shelf-clearing-tasks/', {
+          params: { equipment: equipmentId, status: 'IN_PROGRESS' },
+        }),
         api.get('/products/'),
       ]);
       const taskList = extractApiList<MerchTaskRow>(taskRes.data);
+      const clearingList = [
+        ...extractApiList<MerchTaskRow>(clearingCreatedRes.data),
+        ...extractApiList<MerchTaskRow>(clearingProgressRes.data),
+      ];
       const allProds = extractApiList<ProductBrief>(prodRes.data);
       const freshEquipment = await refreshEquipmentFromServer(equipmentId);
       const prods = allProds
@@ -1056,6 +1142,7 @@ function StoreMap({
         )
         .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
       setMerchTasks(taskList);
+      setMerchClearingTasks(clearingList);
       setMerchProducts(prods);
       const sortedSlots = [...(freshEquipment.slots ?? [])].sort((a, b) =>
         a.row_index === b.row_index ? a.col_index - b.col_index : a.row_index - b.row_index,
@@ -1291,6 +1378,38 @@ function StoreMap({
     }
   }, [fetchMerchData, merchEquipmentId, merchProductId, merchTargetQty, selectedSlot]);
 
+  const handleCreateClearingTask = useCallback(async (): Promise<void> => {
+    if (!selectedSlot || !merchEquipmentId) {
+      return;
+    }
+    const qty = selectedSlot.planogram
+      ? Number(selectedSlot.planogram.current_qty ?? selectedSlot.current_qty ?? 0)
+      : Number(selectedSlot.current_qty ?? 0);
+    if (qty <= 0) {
+      setMerchFeedback({ type: 'err', text: 'На слоте нет товара для уборки.' });
+      return;
+    }
+    setMerchSaving(true);
+    setMerchFeedback(null);
+    try {
+      await api.post('/shelf-clearing-tasks/', { slot_id: selectedSlot.id });
+      setMerchFeedback({
+        type: 'ok',
+        text: 'Задание на уборку создано. Сотрудник перенесёт товар на склад.',
+      });
+      await fetchMerchData(merchEquipmentId);
+    } catch (error) {
+      const ax = error as AxiosError<{ detail?: string }>;
+      const detail = ax.response?.data?.detail;
+      setMerchFeedback({
+        type: 'err',
+        text: typeof detail === 'string' ? detail : 'Не удалось создать задание на уборку.',
+      });
+    } finally {
+      setMerchSaving(false);
+    }
+  }, [fetchMerchData, merchEquipmentId, selectedSlot]);
+
   const handleDeletePlanogram = useCallback(
     async (): Promise<void> => {
       if (!merchEquipmentId) {
@@ -1308,8 +1427,16 @@ function StoreMap({
         await api.delete(`/planograms/${selectedSlot.planogram.id}/`);
         setMerchFeedback({ type: 'ok', text: 'Слот очищен.' });
         await fetchMerchData(merchEquipmentId);
-      } catch {
-        setMerchFeedback({ type: 'err', text: 'Не удалось удалить.' });
+      } catch (error) {
+        const ax = error as AxiosError<{ detail?: string }>;
+        const detail = ax.response?.data?.detail;
+        setMerchFeedback({
+          type: 'err',
+          text:
+            typeof detail === 'string'
+              ? detail
+              : 'Не удалось удалить. Сначала уберите товар и отмените задачи.',
+        });
       } finally {
         setMerchSaving(false);
       }
@@ -2009,9 +2136,31 @@ function StoreMap({
         onSavePlanogram={() => void handleAddPlanogram()}
         onSimulateSale={() => void handleSimulateSale()}
         onDeletePlanogram={() => void handleDeletePlanogram()}
+        onCreateClearingTask={() => void handleCreateClearingTask()}
+        merchClearingTasks={merchClearingTasks}
         readOnly={isEmployeeView}
         highlightTaskId={focusedTaskId}
         focusedSlotId={focusedSlotId}
+      />
+
+      <EquipmentModificationModal
+        open={modificationModalOpen}
+        mode={modificationModalMode}
+        equipmentName={modificationEquipmentName}
+        info={modificationInfo}
+        onClose={() => {
+          setModificationModalOpen(false);
+          setModificationInfo(null);
+        }}
+        onClearingTaskCreated={() => {
+          const id = selectedEquipmentIdRef.current;
+          if (id) {
+            void fetchModificationInfo(id).then(setModificationInfo);
+            if (merchOpen && merchEquipmentId === id) {
+              void fetchMerchData(id);
+            }
+          }
+        }}
       />
     </section>
   );

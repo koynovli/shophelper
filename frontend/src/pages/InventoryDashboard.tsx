@@ -16,18 +16,36 @@ type TrackingRow = {
   hall_qty: number;
   pending_qty: number;
   planogram_target_sum: number;
-  status: 'OK' | 'LOW_STOCK' | 'EXPIRING' | string;
+  status: 'OK' | 'LOW_STOCK' | 'EXPIRING' | 'EXPIRED' | string;
   under_floor_target: boolean;
 };
 
-type BatchDetail = {
-  id: number;
-  expiration_date: string;
-  current_quantity: number;
-  initial_quantity: number;
-  is_active: boolean;
-  days_to_expiry: number;
-};
+type BatchDetail =
+  | {
+      kind: 'batch';
+      id: number;
+      expiration_date: string;
+      current_quantity: number;
+      initial_quantity: number;
+      is_active: boolean;
+      days_to_expiry: number;
+    }
+  | {
+      kind: 'marked_group';
+      expiration_date: string;
+      unit_count: number;
+      days_to_expiry: number;
+      serials: string[];
+      serials_more?: number;
+    };
+
+function isRegularBatch(b: BatchDetail): b is Extract<BatchDetail, { kind: 'batch' }> {
+  return b.kind === 'batch' || ('id' in b && b.kind !== 'marked_group');
+}
+
+function isMarkedGroup(b: BatchDetail): b is Extract<BatchDetail, { kind: 'marked_group' }> {
+  return b.kind === 'marked_group';
+}
 
 type LocationDetail = {
   kind: string;
@@ -79,6 +97,7 @@ const STATUS_UI: Record<string, { label: string; className: string }> = {
   OK: { label: 'Норма', className: 'border-slate-600 bg-slate-800 text-slate-200' },
   LOW_STOCK: { label: 'Дефицит', className: 'border-rose-500/60 bg-rose-950/40 text-rose-100' },
   EXPIRING: { label: 'Срок годности', className: 'border-amber-500/60 bg-amber-950/40 text-amber-100' },
+  EXPIRED: { label: 'Просрочено', className: 'border-red-600/70 bg-red-950/50 text-red-100' },
 };
 
 export function InventoryDashboard(): React.ReactElement {
@@ -99,6 +118,12 @@ export function InventoryDashboard(): React.ReactElement {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [writeOffBusy, setWriteOffBusy] = useState(false);
   const [writeOffMsg, setWriteOffMsg] = useState<string | null>(null);
+  const [manualBatchId, setManualBatchId] = useState<string>('');
+  const [manualQty, setManualQty] = useState<string>('1');
+  const [manualReason, setManualReason] = useState('');
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualMsg, setManualMsg] = useState<string | null>(null);
+  const [expandedMarked, setExpandedMarked] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const t = window.setTimeout(() => setSearchDebounced(search.trim()), 350);
@@ -131,6 +156,8 @@ export function InventoryDashboard(): React.ReactElement {
         params.status = 'OK';
       } else if (statusFilter === 'expiring') {
         params.status = 'EXPIRING';
+      } else if (statusFilter === 'expired') {
+        params.status = 'EXPIRED';
       }
       const r = await api.get<unknown>('/product-tracking/', { params });
       const { rows: list, count: c } = extractPaginated<TrackingRow>(r.data);
@@ -157,11 +184,13 @@ export function InventoryDashboard(): React.ReactElement {
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(count / pageSize)), [count, pageSize]);
 
-  const openDetail = async (id: number): Promise<void> => {
+  const openDetail = async (id: number, expandMarked = false): Promise<void> => {
     setDetailLoading(true);
     setDetailError(null);
     try {
-      const r = await api.get<ProductDetail>(`/product-tracking/${id}/`);
+      const r = await api.get<ProductDetail>(`/product-tracking/${id}/`, {
+        params: expandMarked ? { expand: '1' } : {},
+      });
       setDetail(r.data);
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
@@ -176,6 +205,12 @@ export function InventoryDashboard(): React.ReactElement {
   const closeDetail = (): void => {
     setDetail(null);
     setDetailError(null);
+    setExpandedMarked(new Set());
+  };
+
+  const expandMarkedGroup = async (productId: number, expirationDate: string): Promise<void> => {
+    setExpandedMarked((prev) => new Set(prev).add(expirationDate));
+    await openDetail(productId, true);
   };
 
   const exportCsv = async (): Promise<void> => {
@@ -193,6 +228,8 @@ export function InventoryDashboard(): React.ReactElement {
         params.status = 'OK';
       } else if (statusFilter === 'expiring') {
         params.status = 'EXPIRING';
+      } else if (statusFilter === 'expired') {
+        params.status = 'EXPIRED';
       }
       const r = await api.get<Blob>('/product-tracking/', {
         params,
@@ -213,31 +250,66 @@ export function InventoryDashboard(): React.ReactElement {
     navigate(`/admin?tab=map&equipmentId=${equipmentId}`);
   };
 
-  const runWriteOffExpired = async (dryRun: boolean): Promise<void> => {
+  const runScanWriteOffTasks = async (dryRun: boolean): Promise<void> => {
     setWriteOffBusy(true);
     setWriteOffMsg(null);
     setError(null);
     try {
       const r = await api.post<{
-        slots_written_off: number;
-        units_written_off: number;
         dry_run: boolean;
-      }>('/inventory/write-off-expired/', null, {
+        tasks_total: number;
+        warehouse_tasks: number;
+        shelf_tasks: number;
+      }>('/inventory/scan-write-off-tasks/', null, {
         params: dryRun ? { dry_run: 'true' } : {},
       });
       const prefix = r.data.dry_run ? '[Пробный прогон] ' : '';
-      setWriteOffMsg(
-        `${prefix}Списано слотов: ${r.data.slots_written_off}, единиц: ${r.data.units_written_off}`,
-      );
-      if (!dryRun) {
+      if (r.data.dry_run) {
+        setWriteOffMsg(
+          `${prefix}Будет создано ${r.data.tasks_total} заданий: ${r.data.warehouse_tasks} со склада, ${r.data.shelf_tasks} с полок`,
+        );
+      } else {
+        setWriteOffMsg(`Создано ${r.data.tasks_total} заданий на списание`);
         void loadRows();
       }
     } catch (err) {
       const ax = err as AxiosError<{ detail?: string }>;
       const d = ax.response?.data?.detail;
-      setError(typeof d === 'string' ? d : 'Не удалось выполнить списание.');
+      setError(typeof d === 'string' ? d : 'Не удалось выполнить сканирование.');
     } finally {
       setWriteOffBusy(false);
+    }
+  };
+
+  const submitManualWriteOff = async (): Promise<void> => {
+    if (!detail) {
+      return;
+    }
+    const batchId = Number(manualBatchId);
+    const qty = Number(manualQty);
+    if (!batchId || qty < 1) {
+      setManualMsg('Выберите партию и укажите количество.');
+      return;
+    }
+    setManualBusy(true);
+    setManualMsg(null);
+    try {
+      await api.post('/write-off-tasks/', {
+        batch_id: batchId,
+        quantity: qty,
+        reason: manualReason.trim(),
+      });
+      setManualMsg('Задание на списание создано. Сотрудник утилизирует товар и подтвердит в приложении.');
+      setManualBatchId('');
+      setManualQty('1');
+      setManualReason('');
+      void loadRows();
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      const d = ax.response?.data?.detail;
+      setManualMsg(typeof d === 'string' ? d : 'Не удалось создать задание.');
+    } finally {
+      setManualBusy(false);
     }
   };
 
@@ -254,7 +326,7 @@ export function InventoryDashboard(): React.ReactElement {
           <button
             type="button"
             disabled={writeOffBusy}
-            onClick={() => void runWriteOffExpired(true)}
+            onClick={() => void runScanWriteOffTasks(true)}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 hover:border-amber-500/50 disabled:opacity-50"
           >
             {writeOffBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
@@ -263,11 +335,11 @@ export function InventoryDashboard(): React.ReactElement {
           <button
             type="button"
             disabled={writeOffBusy}
-            onClick={() => void runWriteOffExpired(false)}
+            onClick={() => void runScanWriteOffTasks(false)}
             className="inline-flex items-center gap-2 rounded-lg border border-rose-500/60 bg-rose-950/40 px-3 py-2 text-sm text-rose-100 hover:bg-rose-900/50 disabled:opacity-50"
           >
             <Trash2 className="h-4 w-4" />
-            Списать с полок
+            Создать задания на списание
           </button>
           <button
             type="button"
@@ -338,6 +410,7 @@ export function InventoryDashboard(): React.ReactElement {
             <option value="normal">Норма</option>
             <option value="deficit">Дефицит</option>
             <option value="expiring">Срок годности</option>
+            <option value="expired">Просрочено</option>
           </select>
         </label>
       </div>
@@ -365,12 +438,15 @@ export function InventoryDashboard(): React.ReactElement {
             <tbody>
               {rows.map((row) => {
                 const deficitRow = row.under_floor_target;
+                const expired = row.status === 'EXPIRED';
                 const expiring = row.status === 'EXPIRING';
-                const rowClass = deficitRow
-                  ? 'bg-rose-950/35 border-l-4 border-l-rose-500'
-                  : expiring
-                    ? 'bg-amber-950/25 border-l-4 border-l-amber-500'
-                    : '';
+                const rowClass = expired
+                  ? 'bg-red-950/30 border-l-4 border-l-red-600'
+                  : deficitRow
+                    ? 'bg-rose-950/35 border-l-4 border-l-rose-500'
+                    : expiring
+                      ? 'bg-amber-950/25 border-l-4 border-l-amber-500'
+                      : '';
                 const st = STATUS_UI[row.status] ?? STATUS_UI.OK;
                 return (
                   <tr
@@ -482,15 +558,62 @@ export function InventoryDashboard(): React.ReactElement {
                       <ul className="space-y-2">
                         {detail.batches.map((b) => (
                           <li
-                            key={b.id}
+                            key={
+                              isRegularBatch(b)
+                                ? String(b.id)
+                                : `marked-${b.expiration_date}`
+                            }
                             className="rounded-md border border-slate-700 bg-slate-950/40 px-3 py-2 text-slate-200"
                           >
-                            <span className="font-medium">до {b.expiration_date}</span>
-                            <span className="mx-2 text-slate-500">·</span>
-                            {b.current_quantity} шт.
-                            <span className="ml-2 text-xs text-slate-500">
-                              ({b.days_to_expiry >= 0 ? `осталось ${b.days_to_expiry} дн.` : `просрочка ${-b.days_to_expiry} дн.`})
-                            </span>
+                            {isMarkedGroup(b) ? (
+                              <>
+                                <span className="font-medium">до {b.expiration_date}</span>
+                                <span className="mx-2 text-slate-500">·</span>
+                                {b.unit_count} шт. (маркированные единицы)
+                                <span className="ml-2 text-xs text-slate-500">
+                                  (
+                                  {b.days_to_expiry >= 0
+                                    ? `осталось ${b.days_to_expiry} дн.`
+                                    : `просрочка ${-b.days_to_expiry} дн.`}
+                                  )
+                                </span>
+                                {expandedMarked.has(b.expiration_date) && b.serials.length > 0 ? (
+                                  <ul className="mt-2 space-y-1 border-t border-slate-800 pt-2 text-xs text-slate-400">
+                                    {b.serials.map((sn) => (
+                                      <li key={sn}>{sn}</li>
+                                    ))}
+                                  </ul>
+                                ) : null}
+                                {!expandedMarked.has(b.expiration_date) &&
+                                (b.serials.length > 0 || (b.serials_more ?? 0) > 0) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void expandMarkedGroup(detail.id, b.expiration_date)
+                                    }
+                                    className="mt-2 block text-xs text-indigo-300 hover:text-indigo-200"
+                                  >
+                                    Показать серии
+                                    {(b.serials_more ?? 0) > 0
+                                      ? ` (ещё ${b.serials_more})`
+                                      : ''}
+                                  </button>
+                                ) : null}
+                              </>
+                            ) : (
+                              <>
+                                <span className="font-medium">до {b.expiration_date}</span>
+                                <span className="mx-2 text-slate-500">·</span>
+                                {b.current_quantity} шт.
+                                <span className="ml-2 text-xs text-slate-500">
+                                  (
+                                  {b.days_to_expiry >= 0
+                                    ? `осталось ${b.days_to_expiry} дн.`
+                                    : `просрочка ${-b.days_to_expiry} дн.`}
+                                  )
+                                </span>
+                              </>
+                            )}
                           </li>
                         ))}
                       </ul>
@@ -526,6 +649,69 @@ export function InventoryDashboard(): React.ReactElement {
                         Показать на карте
                       </button>
                     ) : null}
+                  </section>
+
+                  <section>
+                    <h4 className="mb-2 font-semibold text-slate-200">Списать со склада</h4>
+                    <p className="mb-3 text-xs text-slate-500">
+                      Создаёт задание сотруднику — списание в учёте после подтверждения.
+                    </p>
+                    {detail.batches.filter((b) => isRegularBatch(b) && b.current_quantity > 0)
+                      .length === 0 ? (
+                      <p className="text-slate-500">Нет партий с остатком на складе.</p>
+                    ) : (
+                      <div className="space-y-2 rounded-md border border-slate-700 bg-slate-950/40 p-3">
+                        <label className="block text-xs text-slate-400">
+                          Партия
+                          <select
+                            value={manualBatchId}
+                            onChange={(e) => setManualBatchId(e.target.value)}
+                            className="mt-1 block w-full rounded border border-slate-600 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                          >
+                            <option value="">Выберите…</option>
+                            {detail.batches
+                              .filter(isRegularBatch)
+                              .filter((b) => b.current_quantity > 0)
+                              .map((b) => (
+                                <option key={b.id} value={String(b.id)}>
+                                  до {b.expiration_date} — {b.current_quantity} шт.
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <label className="block text-xs text-slate-400">
+                          Количество
+                          <input
+                            type="number"
+                            min={1}
+                            value={manualQty}
+                            onChange={(e) => setManualQty(e.target.value)}
+                            className="mt-1 block w-full rounded border border-slate-600 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                          />
+                        </label>
+                        <label className="block text-xs text-slate-400">
+                          Причина
+                          <input
+                            value={manualReason}
+                            onChange={(e) => setManualReason(e.target.value)}
+                            placeholder="Например: бой, порча"
+                            className="mt-1 block w-full rounded border border-slate-600 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          disabled={manualBusy}
+                          onClick={() => void submitManualWriteOff()}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-rose-500/60 bg-rose-950/40 px-3 py-2 text-sm text-rose-100 hover:bg-rose-900/50 disabled:opacity-50"
+                        >
+                          {manualBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                          Создать задание на списание
+                        </button>
+                        {manualMsg ? (
+                          <p className="text-xs text-sky-200">{manualMsg}</p>
+                        ) : null}
+                      </div>
+                    )}
                   </section>
                 </div>
               ) : null}

@@ -962,13 +962,177 @@ class PlacementTask(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=("planogram",),
-                condition=models.Q(status="CREATED"),
-                name="uniq_placementtask_created_planogram",
+                condition=models.Q(
+                    status__in=("CREATED", "PENDING", "IN_PROGRESS"),
+                ),
+                name="uniq_placementtask_open_planogram",
             ),
         ]
 
     def __str__(self) -> str:
         return f"{self.product} → {self.equipment.name} ({self.quantity} шт., {self.status})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in (
+            self.Status.CREATED,
+            self.Status.PENDING,
+            self.Status.IN_PROGRESS,
+        )
+
+
+class PlacementTaskScan(models.Model):
+    """Зафиксированный скан единицы при выкладке."""
+
+    task = models.ForeignKey(
+        PlacementTask,
+        on_delete=models.CASCADE,
+        related_name="scans",
+        verbose_name="Задача выкладки",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="placement_scans",
+        verbose_name="Товар",
+    )
+    batch = models.ForeignKey(
+        ProductBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="placement_scans",
+        verbose_name="Партия",
+    )
+    serial_number = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        verbose_name="Серийный номер",
+    )
+    scanned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="placement_scans",
+        verbose_name="Сканировал",
+    )
+    scanned_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Время скана",
+    )
+
+    class Meta:
+        verbose_name = "Скан выкладки"
+        verbose_name_plural = "Сканы выкладки"
+        ordering = ("scanned_at", "pk")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("task", "serial_number"),
+                condition=models.Q(serial_number__isnull=False),
+                name="uniq_placement_scan_task_serial",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        label = self.serial_number or "unit"
+        return f"Scan {label} → task #{self.task_id}"
+
+
+class ShelfClearingTask(models.Model):
+    """Задача на уборку товара с полки обратно на склад."""
+
+    class Status(models.TextChoices):
+        CREATED = "CREATED", "Создана"
+        PENDING = "PENDING", "Ожидает"
+        IN_PROGRESS = "IN_PROGRESS", "Выполняется"
+        COMPLETED = "COMPLETED", "Завершено"
+        FAILED = "FAILED", "Проблема"
+        CANCELLED = "CANCELLED", "Отменена"
+
+    planogram = models.ForeignKey(
+        Planogram,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="clearing_tasks",
+        verbose_name="Планограмма",
+    )
+    slot = models.ForeignKey(
+        EquipmentSlot,
+        on_delete=models.CASCADE,
+        related_name="clearing_tasks",
+        verbose_name="Слот",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="clearing_tasks",
+        verbose_name="Товар",
+    )
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.CASCADE,
+        related_name="clearing_tasks",
+        verbose_name="Оборудование",
+    )
+    quantity = models.PositiveIntegerField(
+        verbose_name="Количество",
+        help_text="Сколько единиц убрать с полки на склад.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.CREATED,
+        verbose_name="Статус",
+    )
+    batch = models.ForeignKey(
+        "ProductBatch",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="clearing_tasks",
+        verbose_name="Партия для возврата",
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="clearing_tasks",
+        verbose_name="Исполнитель",
+    )
+    photo_url = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        verbose_name="Фото отчёта (URL)",
+    )
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Завершена",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создана",
+    )
+
+    class Meta:
+        verbose_name = "Задача уборки на склад"
+        verbose_name_plural = "Задачи уборки на склад"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("slot",),
+                condition=models.Q(status="CREATED"),
+                name="uniq_clearingtask_created_slot",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Убрать: {self.product} ← {self.equipment.name} ({self.quantity} шт., {self.status})"
 
     @property
     def is_open(self) -> bool:
@@ -1011,13 +1175,15 @@ class PlacementChatMessage(models.Model):
 
 
 class ShelfWriteOff(models.Model):
-    """Журнал автоматического списания просроченного товара с витрины (слота)."""
+    """Журнал списания товара с витрины (слота)."""
 
     class Reason(models.TextChoices):
         EXPIRED_PLACEMENT_BATCH = (
             "EXPIRED_PLACEMENT_BATCH",
             "Просрочена партия последней выкладки",
         )
+        EXPIRED_BATCH = "EXPIRED_BATCH", "Просроченная партия"
+        MANUAL = "MANUAL", "Ручное списание"
 
     store = models.ForeignKey(
         Store,
@@ -1068,6 +1234,14 @@ class ShelfWriteOff(models.Model):
         default=Reason.EXPIRED_PLACEMENT_BATCH,
         verbose_name="Причина",
     )
+    write_off_task = models.ForeignKey(
+        "WriteOffTask",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="shelf_write_offs",
+        verbose_name="Задача списания",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     class Meta:
@@ -1077,6 +1251,203 @@ class ShelfWriteOff(models.Model):
 
     def __str__(self) -> str:
         return f"{self.product} −{self.quantity} шт. ({self.slot_id})"
+
+
+class WriteOffTask(models.Model):
+    """Задание сотруднику на списание товара со склада или с полки."""
+
+    class Status(models.TextChoices):
+        CREATED = "CREATED", "Создана"
+        PENDING = "PENDING", "Ожидает"
+        IN_PROGRESS = "IN_PROGRESS", "Выполняется"
+        COMPLETED = "COMPLETED", "Завершено"
+        CANCELLED = "CANCELLED", "Отменена"
+
+    class Location(models.TextChoices):
+        WAREHOUSE = "WAREHOUSE", "Склад"
+        SHELF = "SHELF", "Полка"
+
+    class Trigger(models.TextChoices):
+        EXPIRED_AUTO = "EXPIRED_AUTO", "Просрочка (авто)"
+        MANUAL = "MANUAL", "Ручное списание"
+
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="write_off_tasks",
+        verbose_name="Магазин",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="write_off_tasks",
+        verbose_name="Товар",
+    )
+    batch = models.ForeignKey(
+        ProductBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_off_tasks",
+        verbose_name="Партия",
+    )
+    quantity = models.PositiveIntegerField(verbose_name="Количество")
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.CREATED,
+        verbose_name="Статус",
+    )
+    location = models.CharField(
+        max_length=20,
+        choices=Location.choices,
+        verbose_name="Место списания",
+    )
+    trigger = models.CharField(
+        max_length=20,
+        choices=Trigger.choices,
+        default=Trigger.EXPIRED_AUTO,
+        verbose_name="Источник",
+    )
+    reason = models.TextField(blank=True, verbose_name="Причина / комментарий")
+    slot = models.ForeignKey(
+        EquipmentSlot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_off_tasks",
+        verbose_name="Слот",
+    )
+    planogram = models.ForeignKey(
+        Planogram,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_off_tasks",
+        verbose_name="Планограмма",
+    )
+    equipment = models.ForeignKey(
+        Equipment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_off_tasks",
+        verbose_name="Оборудование",
+    )
+    placement_task = models.ForeignKey(
+        PlacementTask,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_off_tasks",
+        verbose_name="Задача выкладки",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_write_off_tasks",
+        verbose_name="Создал",
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="write_off_tasks",
+        verbose_name="Исполнитель",
+    )
+    photo_url = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        verbose_name="Фото отчёта (URL)",
+    )
+    completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершена")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
+
+    class Meta:
+        verbose_name = "Задача на списание"
+        verbose_name_plural = "Задачи на списание"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("batch",),
+                condition=models.Q(
+                    status="CREATED",
+                    location="WAREHOUSE",
+                ),
+                name="uniq_writeofftask_created_warehouse_batch",
+            ),
+            models.UniqueConstraint(
+                fields=("batch", "slot"),
+                condition=models.Q(
+                    status="CREATED",
+                    location="SHELF",
+                ),
+                name="uniq_writeofftask_created_shelf_batch_slot",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"Списать: {self.product} — {self.quantity} шт. "
+            f"({self.location}, {self.status})"
+        )
+
+
+class WarehouseWriteOff(models.Model):
+    """Журнал списания товара со склада (партия)."""
+
+    class Reason(models.TextChoices):
+        EXPIRED_BATCH = "EXPIRED_BATCH", "Просроченная партия"
+        MANUAL = "MANUAL", "Ручное списание"
+
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name="warehouse_write_offs",
+        verbose_name="Магазин",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="warehouse_write_offs",
+        verbose_name="Товар",
+    )
+    batch = models.ForeignKey(
+        ProductBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="warehouse_write_offs",
+        verbose_name="Партия",
+    )
+    write_off_task = models.ForeignKey(
+        WriteOffTask,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="warehouse_write_offs",
+        verbose_name="Задача списания",
+    )
+    quantity = models.PositiveIntegerField(verbose_name="Списано, шт.")
+    reason = models.CharField(
+        max_length=40,
+        choices=Reason.choices,
+        default=Reason.EXPIRED_BATCH,
+        verbose_name="Причина",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+
+    class Meta:
+        verbose_name = "Списание со склада"
+        verbose_name_plural = "Списания со склада"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.product} −{self.quantity} шт. (склад)"
 
 
 class StaffTask(models.Model):

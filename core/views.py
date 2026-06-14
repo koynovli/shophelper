@@ -26,6 +26,7 @@ from .models import (
     Product,
     ProductBatch,
     Shelf,
+    ShelfClearingTask,
     StaffTask,
     StockItem,
     Supplier,
@@ -35,6 +36,7 @@ from .models import (
     User,
     Store,
     StoreMap,
+    WriteOffTask,
     Zone,
 )
 from .permissions import IsRoleAdmin
@@ -44,10 +46,16 @@ from .placement_execution import (
     accept_placement_task,
     complete_placement_task,
     fail_placement_task,
-    verify_slot,
 )
-from .expiry_writeoff import write_off_expired_shelf_stock
+from .placement_scan_service import (
+    PlacementScanError,
+    find_best_task_for_scan,
+    get_picking_list,
+    record_placement_scan,
+    scan_check_for_picking,
+)
 from .placement_sync import adjust_slot_quantity
+from .scan_service import resolve_scan
 from .product_tracking import resolve_store_id
 from .serializers import (
     CategorySerializer,
@@ -61,13 +69,15 @@ from .serializers import (
     PlacementChatMessageSerializer,
     PlacementTaskReadSerializer,
     PlacementTaskUpdateSerializer,
+    ShelfClearingTaskCreateSerializer,
+    ShelfClearingTaskReadSerializer,
     ProductBatchSerializer,
     ProductBriefSerializer,
     ProductCreateSerializer,
     ProductListSerializer,
     ProductSerializer,
     ShelfSerializer,
-    SlotQrVerifySerializer,
+    ScanRawCodeSerializer,
     StaffTaskAdminUpdateSerializer,
     StaffTaskReadSerializer,
     StaffTaskWriteSerializer,
@@ -81,6 +91,8 @@ from .serializers import (
     SupplyOrderUpdateSerializer,
     SupplyReceivingTaskReadSerializer,
     StoreMapSerializer,
+    WriteOffTaskCreateSerializer,
+    WriteOffTaskReadSerializer,
     ZoneSerializer,
 )
 from .supply_receiving_service import (
@@ -93,6 +105,21 @@ from .staff_task_service import StaffTaskError, cancel_staff_task, create_staff_
 from .staff_task_service import accept_staff_task as accept_staff_task_svc
 from .staff_task_service import complete_staff_task as complete_staff_task_svc
 from .staff_task_service import post_chat_message
+from .shelf_clearing_service import (
+    ShelfClearingError,
+    accept_shelf_clearing_task,
+    cancel_shelf_clearing_task,
+    complete_shelf_clearing_task,
+    create_shelf_clearing_task,
+)
+from .write_off_service import (
+    WriteOffError,
+    accept_write_off_task,
+    cancel_write_off_task,
+    complete_write_off_task,
+    create_manual_warehouse_write_off_task,
+    scan_expired_write_off_tasks,
+)
 from .task_pool import fetch_task_pool
 
 
@@ -160,6 +187,25 @@ class ScanCodeView(APIView):
                 "batch": ProductBatchSerializer(batch).data,
                 "status": "found",
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ScanResolveView(APIView):
+    """JWT: разбор кода маркировки / EAN / SKU в контексте магазина сотрудника."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ScanRawCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        store_id = resolve_store_id(request)
+        result = resolve_scan(serializer.validated_data["raw_code"], store_id)
+        return Response(
+            result.to_dict(
+                product_serializer=ProductSerializer,
+                batch_serializer=ProductBatchSerializer,
+            ),
             status=status.HTTP_200_OK,
         )
 
@@ -517,9 +563,24 @@ class EquipmentViewSet(viewsets.ModelViewSet):
     filterset_class = EquipmentFilter
 
     def get_permissions(self):
+        if self.action in ("modification_info",):
+            return [IsAuthenticated(), IsRoleAdmin()]
         if self.request.method in SAFE_METHODS:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsRoleAdmin()]
+
+    def perform_destroy(self, instance: Equipment) -> None:
+        from .equipment_modification_guard import ensure_equipment_can_be_deleted
+
+        ensure_equipment_can_be_deleted(instance)
+        instance.delete()
+
+    @action(detail=True, methods=["get"], url_path="modification-info")
+    def modification_info(self, request, pk=None):
+        from .equipment_modification_guard import assess_equipment_modification
+
+        equipment = self.get_object()
+        return Response(assess_equipment_modification(equipment).to_dict())
 
 
 class ShelfViewSet(viewsets.ModelViewSet):
@@ -543,17 +604,35 @@ class InventoryViewSet(viewsets.ModelViewSet):
     serializer_class = InventorySerializer
 
     def get_permissions(self):
-        if self.action == "write_off_expired":
+        if self.action in ("write_off_expired", "scan_write_off_tasks"):
             return [IsAuthenticated(), IsRoleAdmin()]
         return super().get_permissions()
 
-    @action(detail=False, methods=["post"], url_path="write-off-expired")
-    def write_off_expired(self, request):
-        """Списать просроченный товар с полок (партия последней выкладки)."""
+    @action(detail=False, methods=["post"], url_path="scan-write-off-tasks")
+    def scan_write_off_tasks(self, request):
+        """Сканирует просрочку на складе и полках; создаёт задания сотрудникам."""
         store_id = resolve_store_id(request)
         dry_run = request.query_params.get("dry_run", "").lower() in ("1", "true", "yes")
-        result = write_off_expired_shelf_stock(store_id=store_id, dry_run=dry_run)
+        result = scan_expired_write_off_tasks(store_id, dry_run=dry_run)
         return Response(result.to_dict(), status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="write-off-expired")
+    def write_off_expired(self, request):
+        """Устаревший endpoint: перенаправляет на scan-write-off-tasks."""
+        store_id = resolve_store_id(request)
+        dry_run = request.query_params.get("dry_run", "").lower() in ("1", "true", "yes")
+        result = scan_expired_write_off_tasks(store_id, dry_run=dry_run)
+        legacy = {
+            "dry_run": result.dry_run,
+            "slots_written_off": result.shelf_tasks,
+            "units_written_off": result.shelf_units,
+            "entries": [
+                e
+                for e in result.to_dict()["entries"]
+                if e["location"] == "SHELF"
+            ],
+        }
+        return Response(legacy, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"])
     def shelf_fill_report(self, request):
@@ -729,24 +808,55 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
             )
         return super().destroy(request, *args, **kwargs)
 
+    @action(detail=False, methods=["get"], url_path="picking-list")
+    def picking_list(self, request):
+        store_id = resolve_store_id(request)
+        items = get_picking_list(request.user, store_id)
+        return Response(items)
+
+    @action(detail=False, methods=["post"], url_path="scan-check")
+    def scan_check(self, request):
+        serializer = ScanRawCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        store_id = resolve_store_id(request)
+        raw_code = serializer.validated_data["raw_code"]
+        data = scan_check_for_picking(
+            request.user,
+            raw_code=raw_code,
+            store_id=store_id,
+        )
+        best = find_best_task_for_scan(
+            request.user,
+            raw_code=raw_code,
+            store_id=store_id,
+        )
+        if best.get("best_task"):
+            data["best_task"] = best["best_task"]
+            data["message"] = best["message"]
+        return Response(data)
+
+    @action(detail=True, methods=["post"], url_path="scan-unit")
+    def scan_unit(self, request, pk=None):
+        serializer = ScanRawCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        store_id = resolve_store_id(request)
+        try:
+            task, resolved = record_placement_scan(
+                int(pk),
+                request.user,
+                raw_code=serializer.validated_data["raw_code"],
+                store_id=store_id,
+            )
+        except PlacementScanError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        payload = PlacementTaskReadSerializer(task).data
+        payload["scan_message"] = resolved.message
+        return Response(payload)
+
     @action(detail=True, methods=["post"])
     def accept(self, request, pk=None):
         try:
             task = accept_placement_task(int(pk), request.user)
-        except PlacementExecutionError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(PlacementTaskReadSerializer(task).data)
-
-    @action(detail=True, methods=["post"], url_path="verify-slot")
-    def verify_slot_action(self, request, pk=None):
-        serializer = SlotQrVerifySerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            task = verify_slot(
-                int(pk),
-                request.user,
-                serializer.validated_data["qr_token"],
-            )
         except PlacementExecutionError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(PlacementTaskReadSerializer(task).data)
@@ -792,6 +902,171 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
             PlacementChatMessageSerializer(message).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class ShelfClearingTaskFilter(filters.FilterSet):
+    class Meta:
+        model = ShelfClearingTask
+        fields = ("status", "equipment", "slot")
+
+
+class ShelfClearingTaskViewSet(viewsets.ModelViewSet):
+    """Задания на уборку товара с полки на склад (создаёт менеджер)."""
+
+    http_method_names = ["get", "post", "delete", "head", "options"]
+    queryset = ShelfClearingTask.objects.select_related(
+        "product",
+        "equipment",
+        "slot",
+        "planogram",
+        "assigned_to",
+        "batch",
+    ).all()
+    permission_classes = [IsAuthenticated]
+    filterset_class = ShelfClearingTaskFilter
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return ShelfClearingTaskCreateSerializer
+        return ShelfClearingTaskReadSerializer
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsAuthenticated(), IsRoleAdmin()]
+        if self.action == "destroy":
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+    def create(self, request, *args, **kwargs):
+        serializer = ShelfClearingTaskCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            task = create_shelf_clearing_task(
+                request.user,
+                slot_id=serializer.validated_data["slot_id"],
+            )
+        except ShelfClearingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            ShelfClearingTaskReadSerializer(task).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            task = cancel_shelf_clearing_task(int(kwargs["pk"]), request.user)
+        except ShelfClearingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ShelfClearingTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        try:
+            task = accept_shelf_clearing_task(int(pk), request.user)
+        except ShelfClearingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ShelfClearingTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        photo = request.FILES.get("photo")
+        raw_code = (request.data.get("raw_code") or "").strip()
+        try:
+            task = complete_shelf_clearing_task(
+                int(pk),
+                request.user,
+                photo,
+                raw_code=raw_code,
+                store_id=resolve_store_id(request),
+            )
+        except ShelfClearingError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ShelfClearingTaskReadSerializer(task).data)
+
+
+class WriteOffTaskFilter(filters.FilterSet):
+    class Meta:
+        model = WriteOffTask
+        fields = ("status", "location", "product", "batch")
+
+
+class WriteOffTaskViewSet(viewsets.ModelViewSet):
+    """Задания на списание товара (склад / полка)."""
+
+    http_method_names = ["get", "post", "delete", "head", "options"]
+    queryset = WriteOffTask.objects.select_related(
+        "product",
+        "batch",
+        "store",
+        "slot",
+        "equipment",
+        "planogram",
+        "assigned_to",
+        "created_by",
+    ).all()
+    permission_classes = [IsAuthenticated]
+    filterset_class = WriteOffTaskFilter
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return WriteOffTaskCreateSerializer
+        return WriteOffTaskReadSerializer
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsAuthenticated(), IsRoleAdmin()]
+        if self.action == "destroy":
+            return [IsAuthenticated(), IsRoleAdmin()]
+        return [IsAuthenticated()]
+
+    def create(self, request, *args, **kwargs):
+        serializer = WriteOffTaskCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            task = create_manual_warehouse_write_off_task(
+                request.user,
+                batch_id=data["batch_id"],
+                quantity=data["quantity"],
+                reason=data.get("reason", ""),
+            )
+        except WriteOffError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            WriteOffTaskReadSerializer(task).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            task = cancel_write_off_task(int(kwargs["pk"]), request.user)
+        except WriteOffError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WriteOffTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        try:
+            task = accept_write_off_task(int(pk), request.user)
+        except WriteOffError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WriteOffTaskReadSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        photo = request.FILES.get("photo")
+        raw_code = (request.data.get("raw_code") or "").strip()
+        try:
+            task = complete_write_off_task(
+                int(pk),
+                request.user,
+                photo,
+                raw_code=raw_code,
+                store_id=resolve_store_id(request),
+            )
+        except WriteOffError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WriteOffTaskReadSerializer(task).data)
 
 
 class EquipmentSlotAdjustView(APIView):
@@ -873,6 +1148,12 @@ class PlanogramViewSet(viewsets.ModelViewSet):
         if self.action in ("create", "update", "partial_update"):
             return PlanogramWriteSerializer
         return PlanogramReadSerializer
+
+    def perform_destroy(self, instance: Planogram) -> None:
+        from .equipment_modification_guard import ensure_planogram_can_be_deleted
+
+        ensure_planogram_can_be_deleted(instance)
+        instance.delete()
 
 
 class StockItemFilter(filters.FilterSet):
@@ -1010,21 +1291,3 @@ class TaskPoolView(APIView):
             user=request.user,
         )
         return Response(items)
-
-
-class EquipmentSlotQrView(APIView):
-    permission_classes = [IsAuthenticated, IsRoleAdmin]
-
-    def get(self, request, pk: int):
-        slot = EquipmentSlot.objects.select_related("equipment").filter(pk=pk).first()
-        if slot is None:
-            return Response({"detail": "Слот не найден."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(
-            {
-                "slot_id": slot.pk,
-                "equipment": slot.equipment.name,
-                "row_index": slot.row_index,
-                "col_index": slot.col_index,
-                "qr_token": str(slot.qr_token),
-            }
-        )

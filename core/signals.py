@@ -8,7 +8,11 @@ from .equipment_profiles import (
 )
 from .models import Equipment, EquipmentSlot, Inventory, Planogram, ProductBatch, Shelf, StockItem
 from .placement_sync import reconcile_for_product, reconcile_planogram, sync_stock_item_from_batches
-from .slot_inventory_sync import link_slots_to_shelf, sync_slot_qty_from_inventory
+from .slot_inventory_sync import (
+    is_operational_side_effects_suppressed,
+    link_slots_to_shelf,
+    sync_slot_qty_from_inventory,
+)
 
 
 def _sync_planogram_slot_capacity(planogram: Planogram) -> None:
@@ -47,17 +51,23 @@ def planogram_deleted(sender, instance: Planogram, **kwargs):
 
 @receiver(post_save, sender=StockItem)
 def stock_item_saved(sender, instance: StockItem, **kwargs):
+    if is_operational_side_effects_suppressed():
+        return
     reconcile_for_product(instance.product_id)
 
 
 @receiver(post_save, sender=Inventory)
 def inventory_saved(sender, instance: Inventory, **kwargs):
+    if is_operational_side_effects_suppressed():
+        return
     sync_slot_qty_from_inventory(instance)
     reconcile_for_product(instance.product_id)
 
 
 @receiver(post_delete, sender=Inventory)
 def inventory_deleted(sender, instance: Inventory, **kwargs):
+    if is_operational_side_effects_suppressed():
+        return
     sync_slot_qty_from_inventory(instance)
     reconcile_for_product(instance.product_id)
 

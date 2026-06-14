@@ -24,6 +24,7 @@ from core.models import (
     Zone,
 )
 from core.placement_execution import accept_placement_task, complete_placement_task
+from core.tests.placement_scan_helpers import fulfill_placement_scan_requirements
 from core.placement_sync import (
     available_batch_qty,
     deduct_from_batches,
@@ -203,6 +204,7 @@ class PlacementStockSyncTests(TestCase):
         self.assertIsNotNone(placement)
 
         accept_placement_task(placement.pk, self.employee)
+        fulfill_placement_scan_requirements(placement, self.employee)
         complete_placement_task(placement.pk, self.employee, None)
 
         placement.refresh_from_db()
@@ -232,6 +234,7 @@ class PlacementStockSyncTests(TestCase):
         )
         self.slot.current_qty = 0
         self.slot.save(update_fields=["current_qty"])
+        PlacementTask.objects.filter(planogram=self.planogram).delete()
         task = PlacementTask.objects.create(
             planogram=self.planogram,
             product=self.product,
@@ -240,6 +243,7 @@ class PlacementStockSyncTests(TestCase):
             status=PlacementTask.Status.IN_PROGRESS,
             assigned_to=self.employee,
         )
+        fulfill_placement_scan_requirements(task, self.employee)
         complete_placement_task(task.pk, self.employee, None)
         inv = Inventory.objects.get(
             store=self.store,

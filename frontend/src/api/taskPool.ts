@@ -5,18 +5,24 @@ export type MapTaskHighlight = {
 };
 
 export type TaskPoolItem = {
-  task_type: 'placement' | 'staff' | 'receiving';
+  task_type: 'placement' | 'staff' | 'receiving' | 'shelf_clearing' | 'write_off';
   id: string;
   title: string;
   status: string;
   assigned_to: { id: number; username: string } | null;
   created_at: string;
   destination?: string;
-  product?: { id: number; name: string; sku: string };
+  location?: 'WAREHOUSE' | 'SHELF' | string;
+  trigger?: string;
+  reason?: string;
+  batch_id?: number | null;
+  batch_expiration?: string | null;
+  product?: { id: number; name: string; sku: string; gtin?: string | null; is_marked?: boolean };
   equipment?: { id: number; name: string } | null;
   quantity?: number;
   slot_info?: { id: number; row_index: number; col_index: number } | null;
-  slot_verified?: boolean;
+  scans_done?: number;
+  scans_required?: number;
   photo_url?: string | null;
   description?: string;
   zone?: string | null;
@@ -29,7 +35,13 @@ export type TaskPoolItem = {
 };
 
 export function poolStatusLabel(status: string, taskType: TaskPoolItem['task_type']): string {
-  if ((taskType === 'staff' || taskType === 'receiving') && status === 'CREATED') {
+  if (
+    (taskType === 'staff' ||
+      taskType === 'receiving' ||
+      taskType === 'shelf_clearing' ||
+      taskType === 'write_off') &&
+    status === 'CREATED'
+  ) {
     return 'Ожидает';
   }
   const map: Record<string, string> = {
@@ -49,6 +61,12 @@ export function taskTypeLabel(taskType: TaskPoolItem['task_type']): string {
   }
   if (taskType === 'receiving') {
     return 'Приёмка';
+  }
+  if (taskType === 'shelf_clearing') {
+    return 'Уборка';
+  }
+  if (taskType === 'write_off') {
+    return 'Списание';
   }
   return 'Поручение';
 }

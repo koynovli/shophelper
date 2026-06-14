@@ -1,10 +1,32 @@
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
+
 from django.db.models import Q, Sum
+from django.utils import timezone
 
 from .models import EquipmentSlot, Inventory, Planogram, Shelf
-from .placement_sync import reconcile_slot
 from .spatial_engine import resolve_shelf_for_slot
+
+_suppress_operational_side_effects: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "suppress_operational_side_effects",
+    default=False,
+)
+
+
+def is_operational_side_effects_suppressed() -> bool:
+    return _suppress_operational_side_effects.get()
+
+
+@contextmanager
+def suppress_operational_side_effects():
+    """Отключает обратный resync Inventory→Slot и reconcile_for_product в сигналах."""
+    token = _suppress_operational_side_effects.set(True)
+    try:
+        yield
+    finally:
+        _suppress_operational_side_effects.reset(token)
 
 
 def slots_for_shelf_product(shelf: Shelf, product_id: int):
@@ -16,57 +38,70 @@ def slots_for_shelf_product(shelf: Shelf, product_id: int):
     ).distinct()
 
 
-def sync_slot_qty_from_inventory(inventory: Inventory) -> None:
-    """Агрегирует Inventory SHELF на полке → EquipmentSlot.current_qty."""
-    if inventory.status != Inventory.LocationStatus.SHELF or not inventory.shelf_id:
-        return
-    shelf = inventory.shelf
-    total = int(
-        Inventory.objects.filter(
-            store_id=inventory.store_id,
-            product_id=inventory.product_id,
-            shelf_id=shelf.pk,
-            status=Inventory.LocationStatus.SHELF,
-        ).aggregate(s=Sum("quantity"))["s"]
+def shelf_hall_qty_for_product(shelf: Shelf, product_id: int) -> int:
+    """Сумма current_qty по слотам полки с планограммой товара."""
+    slot_ids = slots_for_shelf_product(shelf, product_id).values_list("pk", flat=True)
+    total = (
+        EquipmentSlot.objects.filter(pk__in=slot_ids).aggregate(s=Sum("current_qty"))["s"]
         or 0
     )
-    for slot in slots_for_shelf_product(shelf, inventory.product_id):
-        EquipmentSlot.objects.filter(pk=slot.pk).update(current_qty=total)
-        reconcile_slot(EquipmentSlot.objects.get(pk=slot.pk))
+    return int(total)
+
+
+def sync_slot_qty_from_inventory(inventory: Inventory) -> None:
+    """Inventory SHELF → EquipmentSlot (только batch-specific строки, не no-batch)."""
+    if inventory.status != Inventory.LocationStatus.SHELF or not inventory.shelf_id:
+        return
+    if inventory.batch_id is None:
+        return
+
+    shelf = inventory.shelf
+    slot_ids = list(
+        slots_for_shelf_product(shelf, inventory.product_id).values_list("pk", flat=True)
+    )
+    if not slot_ids:
+        return
+
+    batch_qty = int(inventory.quantity or 0)
+    if len(slot_ids) == 1:
+        EquipmentSlot.objects.filter(pk=slot_ids[0]).update(current_qty=batch_qty)
+        return
+
+    per_slot = batch_qty // len(slot_ids)
+    remainder = batch_qty % len(slot_ids)
+    for idx, slot_id in enumerate(slot_ids):
+        qty = per_slot + (1 if idx < remainder else 0)
+        EquipmentSlot.objects.filter(pk=slot_id).update(current_qty=qty)
 
 
 def sync_inventory_from_slot(slot: EquipmentSlot, product_id: int, store_id: int) -> None:
-    """Поддержка product-tracking: одна строка SHELF без партии на store+product = current_qty слота."""
+    """Slot → Inventory: агрегат по полке, без обратного resync в сигналах."""
     shelf = resolve_shelf_for_slot(slot)
     if shelf is None:
         return
-    qty = int(slot.current_qty)
-    inv = Inventory.objects.filter(
-        store_id=store_id,
-        product_id=product_id,
-        batch__isnull=True,
-    ).first()
-    if inv is None:
-        Inventory.objects.create(
+    qty = shelf_hall_qty_for_product(shelf, product_id)
+
+    with suppress_operational_side_effects():
+        inv = Inventory.objects.filter(
             store_id=store_id,
             product_id=product_id,
-            shelf=shelf,
+            batch__isnull=True,
+        ).first()
+        if inv is None:
+            Inventory.objects.create(
+                store_id=store_id,
+                product_id=product_id,
+                shelf=shelf,
+                status=Inventory.LocationStatus.SHELF,
+                quantity=qty,
+            )
+            return
+        Inventory.objects.filter(pk=inv.pk).update(
+            shelf_id=shelf.pk,
             status=Inventory.LocationStatus.SHELF,
             quantity=qty,
+            updated_at=timezone.now(),
         )
-        return
-    update_fields: list[str] = []
-    if inv.shelf_id != shelf.pk:
-        inv.shelf = shelf
-        update_fields.append("shelf")
-    if inv.status != Inventory.LocationStatus.SHELF:
-        inv.status = Inventory.LocationStatus.SHELF
-        update_fields.append("status")
-    if int(inv.quantity) != qty:
-        inv.quantity = qty
-        update_fields.append("quantity")
-    if update_fields:
-        inv.save(update_fields=update_fields)
 
 
 def link_slots_to_shelf(shelf: Shelf) -> None:

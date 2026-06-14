@@ -129,6 +129,34 @@ export function TaskControlCenter(): React.ReactElement {
     }
   };
 
+  const cancelClearing = async (id: string): Promise<void> => {
+    try {
+      setSavingId(id);
+      await api.delete(`/shelf-clearing-tasks/${id}/`);
+      await loadData();
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      const detail = ax.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : 'Не удалось отменить задание на уборку.');
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const cancelWriteOff = async (id: string): Promise<void> => {
+    try {
+      setSavingId(id);
+      await api.delete(`/write-off-tasks/${id}/`);
+      await loadData();
+    } catch (err) {
+      const ax = err as AxiosError<{ detail?: string }>;
+      const detail = ax.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : 'Не удалось отменить задание на списание.');
+    } finally {
+      setSavingId(null);
+    }
+  };
+
   const createStaffTask = async (): Promise<void> => {
     setError(null);
     try {
@@ -168,6 +196,8 @@ export function TaskControlCenter(): React.ReactElement {
           >
             <option value="all">Все типы</option>
             <option value="placement">Выкладка</option>
+            <option value="shelf_clearing">Уборка</option>
+            <option value="write_off">Списание</option>
             <option value="staff">Поручения</option>
           </select>
           <select
@@ -350,7 +380,33 @@ export function TaskControlCenter(): React.ReactElement {
                             </select>
                           ) : null}
                         </div>
-                      ) : (
+                      ) : task.task_type === 'shelf_clearing' ? (
+                        <button
+                          type="button"
+                          disabled={
+                            savingId === task.id ||
+                            task.status === 'CANCELLED' ||
+                            task.status === 'COMPLETED'
+                          }
+                          onClick={() => void cancelClearing(task.id)}
+                          className="rounded border border-rose-500/70 bg-rose-900/25 px-2 py-1 text-xs text-rose-100 disabled:opacity-50"
+                        >
+                          Отменить
+                        </button>
+                      ) : task.task_type === 'write_off' ? (
+                        <button
+                          type="button"
+                          disabled={
+                            savingId === task.id ||
+                            task.status === 'CANCELLED' ||
+                            task.status === 'COMPLETED'
+                          }
+                          onClick={() => void cancelWriteOff(task.id)}
+                          className="rounded border border-rose-500/70 bg-rose-900/25 px-2 py-1 text-xs text-rose-100 disabled:opacity-50"
+                        >
+                          Отменить
+                        </button>
+                      ) : task.task_type === 'staff' ? (
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
@@ -375,7 +431,7 @@ export function TaskControlCenter(): React.ReactElement {
                             Отменить
                           </button>
                         </div>
-                      )}
+                      ) : null}
                     </td>
                   </tr>
                 ))}

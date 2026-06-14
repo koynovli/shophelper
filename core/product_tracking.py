@@ -141,6 +141,15 @@ def annotate_product_tracking(qs, store_id: int):
             expiration_date__lte=soon,
         )
     )
+    expired_exists = Exists(
+        ProductBatch.objects.filter(
+            product_id=OuterRef("pk"),
+            store_id=store_id,
+            is_active=True,
+            current_quantity__gt=0,
+            expiration_date__lt=today,
+        )
+    )
 
     return qs.annotate(
         total_quantity=Coalesce(
@@ -165,11 +174,14 @@ def annotate_product_tracking(qs, store_id: int):
             0,
         ),
         has_expiring_batch=expiring_exists,
+        has_expired_batch=expired_exists,
     )
 
 
 def compute_tracking_status(obj) -> str:
-    """OK | LOW_STOCK | EXPIRING (приоритет срока годности)."""
+    """OK | LOW_STOCK | EXPIRING | EXPIRED (приоритет просрочки)."""
+    if getattr(obj, "has_expired_batch", False):
+        return "EXPIRED"
     if getattr(obj, "has_expiring_batch", False):
         return "EXPIRING"
     hall = int(getattr(obj, "hall_qty", 0) or 0)
@@ -345,14 +357,43 @@ class ProductTrackingDetailSerializer(serializers.ModelSerializer):
 
     def get_batches(self, obj: Product):
         sid = int(self.context["store_id"])
+        expand = self.context.get("expand_marked_serials", False)
+        qs = ProductBatch.objects.filter(
+            product_id=obj.pk,
+            store_id=sid,
+            is_active=True,
+            current_quantity__gt=0,
+        ).order_by("expiration_date", "pk")
+
+        if obj.is_marked:
+            groups: dict[str, dict] = {}
+            for b in qs.iterator(chunk_size=200):
+                key = b.expiration_date.isoformat()
+                if key not in groups:
+                    groups[key] = {
+                        "kind": "marked_group",
+                        "expiration_date": key,
+                        "unit_count": 0,
+                        "days_to_expiry": b.get_remaining_days(),
+                        "serials": [],
+                    }
+                groups[key]["unit_count"] += int(b.current_quantity)
+                if b.serial_number and (
+                    expand or len(groups[key]["serials"]) < 10
+                ):
+                    groups[key]["serials"].append(b.serial_number)
+            out = list(groups.values())
+            for g in out:
+                hidden = g["unit_count"] - len(g["serials"])
+                if hidden > 0 and not expand:
+                    g["serials_more"] = hidden
+            return out
+
         out = []
-        for b in (
-            ProductBatch.objects.filter(product_id=obj.pk, store_id=sid)
-            .order_by("expiration_date", "pk")
-            .iterator(chunk_size=100)
-        ):
+        for b in qs.iterator(chunk_size=100):
             out.append(
                 {
+                    "kind": "batch",
                     "id": b.pk,
                     "expiration_date": b.expiration_date.isoformat(),
                     "current_quantity": b.current_quantity,
@@ -417,10 +458,13 @@ class ProductTrackingListView(generics.ListAPIView):
         elif st in ("NORMAL", "OK"):
             qs = qs.filter(
                 ~Q(has_expiring_batch=True),
+                ~Q(has_expired_batch=True),
                 Q(planogram_target_sum__lte=F("hall_qty")) | Q(planogram_target_sum=0),
             )
         elif st == "EXPIRING":
-            qs = qs.filter(has_expiring_batch=True)
+            qs = qs.filter(has_expiring_batch=True, has_expired_batch=False)
+        elif st == "EXPIRED":
+            qs = qs.filter(has_expired_batch=True)
 
         return qs.order_by("name", "pk")
 
@@ -485,6 +529,7 @@ class ProductTrackingDetailView(generics.RetrieveAPIView):
         ctx = super().get_serializer_context()
         sid = resolve_store_id(self.request)
         ctx["store_id"] = sid
+        ctx["expand_marked_serials"] = self.request.query_params.get("expand") == "1"
         pk = self.kwargs.get("pk")
         if sid is not None and pk is not None:
             try:

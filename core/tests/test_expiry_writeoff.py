@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -9,6 +9,7 @@ from django.utils import timezone
 from io import StringIO
 from rest_framework.test import APIClient
 
+from core.tests.placement_scan_helpers import product_scan_payload
 from core.expiry_writeoff import write_off_expired_shelf_stock
 from core.models import (
     Category,
@@ -22,6 +23,7 @@ from core.models import (
     ShelfWriteOff,
     StockItem,
     Store,
+    WriteOffTask,
     Zone,
 )
 
@@ -93,6 +95,12 @@ class ExpiryWriteOffTests(TestCase):
             role=User.Role.ADMIN,
             store=self.store,
         )
+        self.employee = User.objects.create_user(
+            username="emp",
+            password="pass",
+            role=User.Role.EMPLOYEE,
+            store=self.store,
+        )
         self.slot.current_qty = 5
         self.slot.save(update_fields=["current_qty"])
 
@@ -107,11 +115,29 @@ class ExpiryWriteOffTests(TestCase):
             completed_at=timezone.now(),
         )
 
-    def test_write_off_expired_placement_batch(self):
+    def _complete_shelf_write_off_task(self) -> WriteOffTask:
+        task = WriteOffTask.objects.get(location=WriteOffTask.Location.SHELF)
+        client = APIClient()
+        client.force_authenticate(self.employee)
+        client.post(f"/api/write-off-tasks/{task.pk}/accept/")
+        client.post(
+            f"/api/write-off-tasks/{task.pk}/complete/",
+            product_scan_payload(self.product),
+            format="json",
+        )
+        return task
+
+    def test_legacy_write_off_creates_shelf_task(self):
         self._completed_placement(self.expired_batch)
         result = write_off_expired_shelf_stock(store_id=self.store.pk)
         self.assertEqual(result.slots_written_off, 1)
         self.assertEqual(result.units_written_off, 5)
+        self.slot.refresh_from_db()
+        self.assertEqual(int(self.slot.current_qty), 5)
+        self.assertEqual(WriteOffTask.objects.filter(location=WriteOffTask.Location.SHELF).count(), 1)
+        self.assertEqual(ShelfWriteOff.objects.count(), 0)
+
+        self._complete_shelf_write_off_task()
         self.slot.refresh_from_db()
         self.assertEqual(int(self.slot.current_qty), 0)
         self.assertEqual(ShelfWriteOff.objects.count(), 1)
@@ -124,6 +150,7 @@ class ExpiryWriteOffTests(TestCase):
         write_off_expired_shelf_stock(store_id=self.store.pk)
         self.slot.refresh_from_db()
         self.assertEqual(int(self.slot.current_qty), 5)
+        self.assertEqual(WriteOffTask.objects.count(), 0)
         self.assertEqual(ShelfWriteOff.objects.count(), 0)
 
     def test_dry_run_no_db_changes(self):
@@ -132,22 +159,26 @@ class ExpiryWriteOffTests(TestCase):
         self.assertEqual(result.slots_written_off, 1)
         self.slot.refresh_from_db()
         self.assertEqual(int(self.slot.current_qty), 5)
+        self.assertEqual(WriteOffTask.objects.count(), 0)
         self.assertEqual(ShelfWriteOff.objects.count(), 0)
 
     def test_management_command_dry_run(self):
         self._completed_placement(self.expired_batch)
         out = StringIO()
-        call_command("write_off_expired_shelf", "--dry-run", stdout=out)
-        self.assertIn("dry-run", out.getvalue())
+        call_command("scan_write_off_tasks", "--dry-run", stdout=out)
+        self.assertIn("dry-run", out.getvalue().lower())
         self.slot.refresh_from_db()
         self.assertEqual(int(self.slot.current_qty), 5)
 
-    def test_api_write_off_expired(self):
+    def test_api_scan_write_off_tasks(self):
         self._completed_placement(self.expired_batch)
         client = APIClient()
         client.force_authenticate(self.admin)
-        resp = client.post("/api/inventory/write-off-expired/")
+        resp = client.post("/api/inventory/scan-write-off-tasks/")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["units_written_off"], 5)
+        self.assertGreaterEqual(resp.data["shelf_tasks"], 1)
         self.slot.refresh_from_db()
-        self.assertEqual(int(self.slot.current_qty), 0)
+        self.assertEqual(int(self.slot.current_qty), 5)
+        self.assertTrue(
+            WriteOffTask.objects.filter(location=WriteOffTask.Location.SHELF).exists()
+        )

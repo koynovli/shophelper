@@ -293,11 +293,10 @@ class PlanogramAdmin(admin.ModelAdmin):
 
 @admin.register(EquipmentSlot)
 class EquipmentSlotAdmin(admin.ModelAdmin):
-    list_display = ("id", "equipment", "row_index", "col_index", "width_percent", "qr_token")
+    list_display = ("id", "equipment", "row_index", "col_index", "width_percent")
     list_filter = ("equipment__zone__store", "equipment__type")
-    search_fields = ("equipment__name", "qr_token")
+    search_fields = ("equipment__name",)
     autocomplete_fields = ("equipment",)
-    readonly_fields = ("qr_token",)
 
 
 @admin.register(StockItem)

@@ -64,7 +64,6 @@ TES для SMB-ритейла: цифровой план зала, FEFO-парт
 |----------|------------|
 | `GET /api/store-map/` | Размер холста зала (`width_m`, `length_m`) |
 | `GET /api/zones/` | Зоны + оборудование + вложенные `slots[]` (планограмма, остатки) |
-| `GET /api/slots/{id}/qr/` | QR-токен слота |
 
 **Типы оборудования:** `shelf`, `hanger`, `fridge`, `box`, `mannequin` (миграция с legacy `shelving` / `pegboard` / `pallet` / `display`).
 
@@ -125,23 +124,27 @@ Channels использует Redis при заданном `REDIS_URL`.
 
 Симуляция продажи со слота: `POST /api/slots/{id}/adjust-qty/` с телом `{"delta": -2}`.
 
-## Автосписание просрочки с полок
+## Задания на списание просрочки
 
-Если **партия последней завершённой выкладки** на слот просрочена (`expiration_date < сегодня`), остаток на слоте (`current_qty`) обнуляется, пишется журнал `ShelfWriteOff`, срабатывает триггер пополнения 30%.
+Просроченные партии на **складе** и **полках** не списываются мгновенно: создаётся `WriteOffTask`, сотрудник подтверждает утилизацию, после чего обновляется учёт (`WarehouseWriteOff` / `ShelfWriteOff`).
+
+Сканирование (склад + полки по последней `COMPLETED` выкладке с `batch`):
 
 ```bash
-# Просмотр без изменений
-python manage.py write_off_expired_shelf --dry-run
+# Просмотр без создания заданий
+python manage.py scan_write_off_tasks --dry-run
 
-# Списание (все магазины или --store-id N)
-python manage.py write_off_expired_shelf
+# Создать задания (все магазины или --store-id N)
+python manage.py scan_write_off_tasks
 ```
 
-API (админ): `POST /api/inventory/write-off-expired/` (query `dry_run=true` для пробного прогона).
+API (админ):
 
-**Ограничение:** учитывается только последняя `COMPLETED` выкладка с `batch`; слоты без такой истории не списываются автоматически.
+- `POST /api/inventory/scan-write-off-tasks/?dry_run=true` — preview
+- `POST /api/inventory/scan-write-off-tasks/` — создать задания
+- `POST /api/write-off-tasks/` — ручное списание партии со склада `{ batch_id, quantity, reason }`
 
-Рекомендуется запускать **ежедневно** (Планировщик заданий Windows / cron).
+Рекомендуется запускать **scan_write_off_tasks ежедневно** (Планировщик заданий Windows / cron) и дублировать кнопками в «Учёт товаров».
 
 ## Как проверить MVP за 2 минуты
 
@@ -149,7 +152,7 @@ API (админ): `POST /api/inventory/write-off-expired/` (query `dry_run=true`
 2. Запуск: `python manage.py runserver` (или `daphne … asgi:application`) и `cd frontend && npm start`
 3. Войти **менеджером** → вкладка **Карта зала** → открыть оборудование с планограммой: на слоте видно **«на полке: X / Y»**, кнопка **«Симулировать продажу (−1)»**
 4. При заполнении &lt; 30% появится задача **CREATED** (вкладка **Задачи** или `GET /api/task-pool/`)
-5. Войти **сотрудником** (`role=employee`, привязка к `store`) → `/employee` → взять задачу → QR → фото
+5. Войти **сотрудником** (`role=employee`, привязка к `store`) → `/employee` → взять задачу → отсканировать товар → завершить (фото по желанию)
 6. Toast на PWA сотрудника при `ws/notifications/` (нужен тот же магазин у пользователя)
 
 Для теста PWA под админом: в шапке админки ссылка «PWA сотрудника» (откроется `/employee` только для `role=employee` — создайте пользователя `employee` в Django Admin).

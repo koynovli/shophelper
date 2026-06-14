@@ -138,10 +138,18 @@ class ContourCTaskTests(TestCase):
         self.assertIsNotNone(placement.get("slot_info"))
         self.assertEqual(placement["slot_info"]["id"], self.slot.pk)
 
-    def test_placement_accept_and_complete_without_qr_or_photo(self):
+    def test_placement_accept_and_complete_with_product_scans(self):
         self.client.force_authenticate(self.employee)
         accept = self.client.post(f"/api/placement-tasks/{self.placement.pk}/accept/")
         self.assertEqual(accept.status_code, 200)
+
+        for _ in range(int(self.placement.quantity)):
+            scan = self.client.post(
+                f"/api/placement-tasks/{self.placement.pk}/scan-unit/",
+                {"raw_code": self.product.sku},
+                format="json",
+            )
+            self.assertEqual(scan.status_code, 200)
 
         done = self.client.post(f"/api/placement-tasks/{self.placement.pk}/complete/")
         self.assertEqual(done.status_code, 200)
@@ -149,26 +157,11 @@ class ContourCTaskTests(TestCase):
         self.assertEqual(self.placement.status, PlacementTask.Status.COMPLETED)
         self.assertFalse(self.placement.photo_url)
 
-    def test_placement_verify_slot_still_works_but_optional(self):
+    def test_placement_complete_rejected_without_scans(self):
         self.client.force_authenticate(self.employee)
-        accept = self.client.post(f"/api/placement-tasks/{self.placement.pk}/accept/")
-        self.assertEqual(accept.status_code, 200)
-
-        bad_qr = self.client.post(
-            f"/api/placement-tasks/{self.placement.pk}/verify-slot/",
-            {"qr_token": "00000000-0000-0000-0000-000000000001"},
-            format="json",
-        )
-        self.assertEqual(bad_qr.status_code, 400)
-
-        ok_qr = self.client.post(
-            f"/api/placement-tasks/{self.placement.pk}/verify-slot/",
-            {"qr_token": str(self.slot.qr_token)},
-            format="json",
-        )
-        self.assertEqual(ok_qr.status_code, 200)
-        self.placement.refresh_from_db()
-        self.assertIsNotNone(self.placement.slot_verified_at)
+        self.client.post(f"/api/placement-tasks/{self.placement.pk}/accept/")
+        done = self.client.post(f"/api/placement-tasks/{self.placement.pk}/complete/")
+        self.assertEqual(done.status_code, 400)
 
     def test_staff_task_lifecycle(self):
         self.client.force_authenticate(self.admin)

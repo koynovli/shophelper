@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from django.db import transaction
 from django.utils import timezone
 
-from .models import EquipmentSlot, Planogram, PlacementTask, ProductBatch, ShelfWriteOff
-from .placement_sync import reconcile_slot
-from .slot_inventory_sync import sync_inventory_from_slot
+from .models import Planogram, PlacementTask, ProductBatch
+from .write_off_service import scan_expired_write_off_tasks
 
 
 @dataclass
@@ -46,19 +44,6 @@ class WriteOffResult:
         }
 
 
-def _last_completed_placement(planogram_id: int) -> PlacementTask | None:
-    return (
-        PlacementTask.objects.filter(
-            planogram_id=planogram_id,
-            status=PlacementTask.Status.COMPLETED,
-            batch_id__isnull=False,
-        )
-        .select_related("batch")
-        .order_by("-completed_at", "-pk")
-        .first()
-    )
-
-
 def _deactivate_empty_expired_batches(store_id: int | None = None) -> int:
     today = timezone.localdate()
     qs = ProductBatch.objects.filter(
@@ -77,75 +62,32 @@ def write_off_expired_shelf_stock(
     dry_run: bool = False,
 ) -> WriteOffResult:
     """
-    Списывает просрочку с полок: если партия последней COMPLETED-выкладки на слот
-  просрочена — обнуляет slot.current_qty (склад/партию не трогает).
+    Устаревший мгновенный списание с полок.
+    Используйте scan_expired_write_off_tasks + complete_write_off_task.
     """
+    scan = scan_expired_write_off_tasks(store_id, dry_run=True)
     result = WriteOffResult(dry_run=dry_run)
-    pg_qs = (
-        Planogram.objects.filter(slot__current_qty__gt=0)
-        .select_related(
-            "slot",
-            "slot__equipment",
-            "slot__equipment__zone",
-            "product",
-        )
-        .order_by("pk")
-    )
-    if store_id is not None:
-        pg_qs = pg_qs.filter(slot__equipment__zone__store_id=store_id)
-
-    for pg in pg_qs:
-        task = _last_completed_placement(pg.pk)
-        if task is None or task.batch_id is None:
+    for entry in scan.entries:
+        if entry.location != "SHELF":
             continue
-        batch = task.batch
-        if not batch.is_expired:
-            continue
-
-        qty = int(pg.slot.current_qty)
-        if qty <= 0:
-            continue
-
-        entry = WriteOffEntry(
-            planogram_id=pg.pk,
-            slot_id=pg.slot_id,
-            product_id=pg.product_id,
-            batch_id=batch.pk,
-            quantity=qty,
-            placement_task_id=task.pk,
-        )
-        result.entries.append(entry)
-
-        if dry_run:
-            result.slots_written_off += 1
-            result.units_written_off += qty
-            continue
-
-        store_pk = pg.slot.equipment.zone.store_id
-        with transaction.atomic():
-            slot = EquipmentSlot.objects.select_for_update().get(pk=pg.slot_id)
-            if int(slot.current_qty) <= 0:
-                continue
-            write_qty = int(slot.current_qty)
-            slot.current_qty = 0
-            slot.save(update_fields=["current_qty"])
-            sync_inventory_from_slot(slot, pg.product_id, store_pk)
-            ShelfWriteOff.objects.create(
-                store_id=store_pk,
-                slot=slot,
-                product_id=pg.product_id,
-                batch=batch,
-                planogram=pg,
-                placement_task=task,
-                quantity=write_qty,
-                reason=ShelfWriteOff.Reason.EXPIRED_PLACEMENT_BATCH,
+        result.entries.append(
+            WriteOffEntry(
+                planogram_id=entry.planogram_id or 0,
+                slot_id=entry.slot_id or 0,
+                product_id=entry.product_id,
+                batch_id=entry.batch_id,
+                quantity=entry.quantity,
+                placement_task_id=None,
             )
-            result.slots_written_off += 1
-            result.units_written_off += write_qty
+        )
+        result.slots_written_off += 1
+        result.units_written_off += entry.quantity
 
-        reconcile_slot(EquipmentSlot.objects.get(pk=pg.slot_id))
+    if dry_run:
+        return result
 
-    if not dry_run:
-        _deactivate_empty_expired_batches(store_id)
-
+    created = scan_expired_write_off_tasks(store_id, dry_run=False)
+    result.slots_written_off = created.shelf_tasks
+    result.units_written_off = created.shelf_units
+    _deactivate_empty_expired_batches(store_id)
     return result

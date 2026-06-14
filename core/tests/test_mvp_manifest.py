@@ -27,6 +27,7 @@ from core.models import (
     Zone,
 )
 from core.placement_execution import complete_placement_task
+from core.tests.placement_scan_helpers import fulfill_placement_scan_requirements
 from core.placement_sync import deduct_from_batches, reconcile_planogram
 
 User = get_user_model()
@@ -113,6 +114,7 @@ class MvpManifestTests(TestCase):
         cap = self.slot.max_capacity
         self.slot.current_qty = 0
         self.slot.save(update_fields=["current_qty"])
+        PlacementTask.objects.filter(planogram=self.planogram).delete()
         task = PlacementTask.objects.create(
             planogram=self.planogram,
             product=self.product,
@@ -124,6 +126,7 @@ class MvpManifestTests(TestCase):
         )
         batch_before = int(self.batch.current_quantity)
         slot_before = int(self.slot.current_qty)
+        fulfill_placement_scan_requirements(task, self.employee)
         complete_placement_task(task.pk, self.employee, None)
         self.batch.refresh_from_db()
         self.slot.refresh_from_db()
@@ -170,19 +173,44 @@ class MvpManifestTests(TestCase):
         )
 
     def test_inventory_sync_updates_slot_qty(self):
-        self.slot.current_qty = 0
+        self.slot.current_qty = 4
         self.slot.save(update_fields=["current_qty"])
-        Inventory.objects.create(
+        sibling = (
+            EquipmentSlot.objects.filter(
+                equipment=self.equipment,
+                row_index=self.slot.row_index,
+            )
+            .exclude(pk=self.slot.pk)
+            .first()
+        )
+        if sibling is not None:
+            sibling.shelf = self.shelf
+            sibling.save(update_fields=["shelf"])
+            Planogram.objects.create(
+                slot=sibling,
+                product=self.product,
+                target_quantity=24,
+            )
+            sibling.current_qty = 6
+            sibling.save(update_fields=["current_qty"])
+            PlacementTask.objects.filter(planogram__slot=sibling).delete()
+
+        from core.slot_inventory_sync import sync_inventory_from_slot
+
+        sync_inventory_from_slot(self.slot, self.product.pk, self.store.pk)
+
+        inv = Inventory.objects.get(
             store=self.store,
             product=self.product,
-            shelf=self.shelf,
-            status=Inventory.LocationStatus.SHELF,
-            quantity=7,
+            batch__isnull=True,
         )
+        expected = 4 + (6 if sibling is not None else 0)
+        self.assertEqual(inv.quantity, expected)
         self.slot.refresh_from_db()
-        self.assertEqual(int(self.slot.current_qty), 7)
+        self.assertEqual(int(self.slot.current_qty), 4)
 
     def test_fail_placement_endpoint(self):
+        PlacementTask.objects.filter(planogram=self.planogram).delete()
         task = PlacementTask.objects.create(
             planogram=self.planogram,
             product=self.product,

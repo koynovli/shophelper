@@ -18,6 +18,7 @@ from .models import (
     Product,
     ProductBatch,
     Shelf,
+    ShelfClearingTask,
     StaffTask,
     StockItem,
     Store,
@@ -27,6 +28,7 @@ from .models import (
     SupplyOrderItem,
     SupplyReceivingTask,
     User,
+    WriteOffTask,
     Zone,
 )
 from .placement_sync import release_placement_task_reservation
@@ -41,7 +43,7 @@ class ProductSerializer(serializers.ModelSerializer):
 class ProductBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
-        fields = ("id", "name", "sku", "shelf_life_days")
+        fields = ("id", "name", "sku", "shelf_life_days", "gtin", "is_marked")
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -288,7 +290,9 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
     assigned_to = UserBriefSerializer(read_only=True)
     slot_info = serializers.SerializerMethodField()
     destination_text = serializers.SerializerMethodField()
-    slot_qr_token = serializers.SerializerMethodField()
+    scans_done = serializers.SerializerMethodField()
+    scans_required = serializers.IntegerField(source="quantity", read_only=True)
+    batch_expiration = serializers.SerializerMethodField()
 
     class Meta:
         model = PlacementTask
@@ -303,17 +307,26 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
             "status",
             "assigned_to",
             "batch",
+            "batch_expiration",
             "photo_url",
-            "slot_verified_at",
+            "scans_done",
+            "scans_required",
             "completed_at",
-            "slot_qr_token",
             "created_at",
         )
 
-    def get_slot_qr_token(self, obj: PlacementTask):
-        if obj.planogram_id and obj.planogram.slot_id:
-            return str(obj.planogram.slot.qr_token)
-        return None
+    def get_scans_done(self, obj: PlacementTask) -> int:
+        if hasattr(obj, "_scans_done"):
+            return int(obj._scans_done)
+        return obj.scans.count()
+
+    def get_batch_expiration(self, obj: PlacementTask):
+        if obj.batch_id is None:
+            return None
+        batch = ProductBatch.objects.filter(pk=obj.batch_id).first()
+        if batch is None:
+            return None
+        return batch.expiration_date.isoformat()
 
     def get_slot_info(self, obj: PlacementTask):
         if obj.planogram_id is None or obj.planogram.slot_id is None:
@@ -451,6 +464,108 @@ class PlacementTaskAdminUpdateSerializer(serializers.ModelSerializer):
         if instance.planogram_id and instance.status == PlacementTask.Status.COMPLETED:
             reconcile_planogram(instance.planogram)
         return instance
+
+
+class ShelfClearingTaskReadSerializer(serializers.ModelSerializer):
+    product = ProductBriefSerializer(read_only=True)
+    equipment = EquipmentBriefSerializer(read_only=True)
+    assigned_to = UserBriefSerializer(read_only=True)
+    slot_info = serializers.SerializerMethodField()
+    destination_text = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ShelfClearingTask
+        fields = (
+            "id",
+            "planogram",
+            "slot",
+            "product",
+            "equipment",
+            "slot_info",
+            "destination_text",
+            "quantity",
+            "status",
+            "assigned_to",
+            "batch",
+            "photo_url",
+            "completed_at",
+            "created_at",
+        )
+
+    def get_slot_info(self, obj: ShelfClearingTask):
+        slot = obj.slot
+        return {
+            "id": slot.id,
+            "row_index": slot.row_index,
+            "col_index": slot.col_index,
+        }
+
+    def get_destination_text(self, obj: ShelfClearingTask) -> str:
+        slot = obj.slot
+        return (
+            f"{obj.equipment.name} ← Полка {slot.row_index + 1} ← "
+            f"Ячейка {slot.col_index + 1} → склад"
+        )
+
+
+class ShelfClearingTaskCreateSerializer(serializers.Serializer):
+    slot_id = serializers.IntegerField(min_value=1)
+
+
+class WriteOffTaskReadSerializer(serializers.ModelSerializer):
+    product = ProductBriefSerializer(read_only=True)
+    assigned_to = UserBriefSerializer(read_only=True)
+    destination_text = serializers.SerializerMethodField()
+    batch_expiration = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WriteOffTask
+        fields = (
+            "id",
+            "store",
+            "product",
+            "batch",
+            "quantity",
+            "status",
+            "location",
+            "trigger",
+            "reason",
+            "slot",
+            "planogram",
+            "equipment",
+            "placement_task",
+            "destination_text",
+            "batch_expiration",
+            "assigned_to",
+            "photo_url",
+            "completed_at",
+            "created_at",
+        )
+
+    def get_destination_text(self, obj: WriteOffTask) -> str:
+        if obj.location == WriteOffTask.Location.WAREHOUSE:
+            return "Склад"
+        if obj.equipment_id and obj.slot_id:
+            slot = obj.slot
+            return (
+                f"{obj.equipment.name} → Полка {slot.row_index + 1} → "
+                f"Ячейка {slot.col_index + 1}"
+            )
+        return "Полка"
+
+    def get_batch_expiration(self, obj: WriteOffTask):
+        if obj.batch_id is None:
+            return None
+        batch = ProductBatch.objects.filter(pk=obj.batch_id).first()
+        if batch is None:
+            return None
+        return batch.expiration_date.isoformat()
+
+
+class WriteOffTaskCreateSerializer(serializers.Serializer):
+    batch_id = serializers.IntegerField(min_value=1)
+    quantity = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=2000)
 
 
 class PlanogramReadSerializer(serializers.ModelSerializer):
@@ -998,11 +1113,8 @@ class EquipmentSerializer(serializers.ModelSerializer):
         if instance is None:
             return attrs
 
-        from .equipment_layout_sync import (
-            LAYOUT_CHANGE_BLOCKED_MSG,
-            equipment_has_blocking_stock_or_tasks,
-            layout_fields_changed,
-        )
+        from .equipment_layout_sync import layout_fields_changed
+        from .equipment_modification_guard import ensure_equipment_layout_can_change
 
         new_type = attrs.get("type", instance.type)
         new_rows = attrs.get("rows_count", instance.rows_count)
@@ -1013,8 +1125,13 @@ class EquipmentSerializer(serializers.ModelSerializer):
             new_rows_count=new_rows,
             new_row_slot_layouts=new_layouts,
         ):
-            if equipment_has_blocking_stock_or_tasks(instance):
-                raise serializers.ValidationError(LAYOUT_CHANGE_BLOCKED_MSG)
+            try:
+                ensure_equipment_layout_can_change(instance)
+            except serializers.ValidationError as exc:
+                detail = exc.detail
+                if isinstance(detail, dict) and "detail" in detail:
+                    raise serializers.ValidationError(detail["detail"])
+                raise
         return attrs
 
     def update(self, instance, validated_data):
@@ -1200,5 +1317,11 @@ class ChatMessageCreateSerializer(serializers.Serializer):
     text = serializers.CharField(max_length=4000, required=False, allow_blank=True)
 
 
-class SlotQrVerifySerializer(serializers.Serializer):
-    qr_token = serializers.UUIDField()
+class ScanRawCodeSerializer(serializers.Serializer):
+    raw_code = serializers.CharField(max_length=4000)
+
+    def validate_raw_code(self, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Передайте raw_code со сканера.")
+        return value

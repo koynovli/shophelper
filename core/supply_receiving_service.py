@@ -113,6 +113,40 @@ def execute_supply_order_receive(
             if actual_qty == 0:
                 continue
 
+            unit_serials = line.get("unit_serials") or []
+            if item.product.is_marked:
+                if len(unit_serials) != actual_qty:
+                    raise SupplyReceivingError(
+                        f"Для маркированного товара «{item.product.name}» передайте "
+                        f"unit_serials из {actual_qty} серийных номеров."
+                    )
+                for serial in unit_serials:
+                    serial = str(serial).strip()
+                    if not serial:
+                        raise SupplyReceivingError("Пустой серийный номер в unit_serials.")
+                    batch = ProductBatch.objects.create(
+                        product=item.product,
+                        store=order.store,
+                        supply_item=item,
+                        purchase_price=item.purchase_price,
+                        initial_quantity=1,
+                        current_quantity=1,
+                        manufacture_date=manufacture_date,
+                        expiration_date=exp_date,
+                        serial_number=serial,
+                        is_active=True,
+                    )
+                    Inventory.objects.update_or_create(
+                        store=order.store,
+                        product=item.product,
+                        batch=batch,
+                        defaults={
+                            "quantity": 1,
+                            "status": Inventory.LocationStatus.WAREHOUSE,
+                        },
+                    )
+                continue
+
             batch = ProductBatch.objects.create(
                 product=item.product,
                 store=order.store,

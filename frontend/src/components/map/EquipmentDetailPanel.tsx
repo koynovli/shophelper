@@ -1,8 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Loader2, X } from 'lucide-react';
 
-import api from '../../api';
 import {
   EQUIPMENT_TYPE_SHORT_LABELS,
   getLayoutMode,
@@ -18,6 +17,7 @@ type MerchTaskRow = {
   quantity: number;
   status: string;
   product: { id: number; name: string; sku: string };
+  slot_info?: { id: number; row_index: number; col_index: number } | null;
 };
 
 type Props = {
@@ -42,6 +42,8 @@ type Props = {
   onSavePlanogram: () => void;
   onSimulateSale: () => void;
   onDeletePlanogram: () => void;
+  onCreateClearingTask: () => void;
+  merchClearingTasks: MerchTaskRow[];
   readOnly?: boolean;
   highlightTaskId?: number | string | null;
   focusedSlotId?: number | null;
@@ -69,12 +71,23 @@ export function EquipmentDetailPanel({
   onSavePlanogram,
   onSimulateSale,
   onDeletePlanogram,
+  onCreateClearingTask,
+  merchClearingTasks,
   readOnly = false,
   highlightTaskId = null,
   focusedSlotId = null,
 }: Props): React.ReactElement | null {
   const selectedSlot = slotsSorted.find((s) => s.id === selectedSlotId) ?? null;
-  const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const selectedSlotQty = selectedSlot
+    ? Number(
+        selectedSlot.planogram?.current_qty ??
+          selectedSlot.current_qty ??
+          0,
+      )
+    : 0;
+  const slotHasClearingTask =
+    selectedSlot != null &&
+    merchClearingTasks.some((t) => t.slot_info?.id === selectedSlot.id);
 
   const eqType = equipment ? normalizeEquipmentType(String(equipment.type)) : 'shelf';
   const layoutMode = equipment ? getLayoutMode(String(equipment.type)) : 'grid';
@@ -89,29 +102,6 @@ export function EquipmentDetailPanel({
     }
     return Array.from(rows.entries()).sort(([a], [b]) => a - b);
   }, [slotsSorted]);
-
-  useEffect(() => {
-    if (!selectedSlotId || !open || readOnly) {
-      setQrUrl(null);
-      return;
-    }
-    let cancelled = false;
-    void api
-      .get<{ qr_token?: string }>(`/slots/${selectedSlotId}/qr/`)
-      .then((res) => {
-        if (!cancelled) {
-          setQrUrl(res.data.qr_token ?? null);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setQrUrl(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedSlotId, open, readOnly]);
 
   if (!open || !equipment) {
     return null;
@@ -257,11 +247,6 @@ export function EquipmentDetailPanel({
               )
             ) : (
               <>
-                {qrUrl ? (
-                  <p className="mt-2 break-all font-mono text-[10px] text-slate-500">
-                    QR-токен: {qrUrl}
-                  </p>
-                ) : null}
                 {merchProducts.length === 0 ? (
                   <p className="mt-3 rounded-md border border-amber-600/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-100">
                     Нет товаров для типа «{equipmentTypeLabel}» — настройте допустимые типы в
@@ -345,6 +330,16 @@ export function EquipmentDetailPanel({
                   >
                     Очистить
                   </button>
+                  {selectedSlotQty > 0 ? (
+                    <button
+                      type="button"
+                      disabled={merchSaving || slotHasClearingTask}
+                      onClick={onCreateClearingTask}
+                      className="rounded-md border border-violet-500/60 px-3 py-1.5 text-xs text-violet-100 disabled:opacity-50"
+                    >
+                      {slotHasClearingTask ? 'Уборка назначена' : 'Убрать на склад'}
+                    </button>
+                  ) : null}
                   <Link
                     to="/admin?tab=catalog"
                     className="rounded-md border border-violet-500/50 px-3 py-1.5 text-xs text-violet-100"
@@ -356,6 +351,21 @@ export function EquipmentDetailPanel({
             )}
           </div>
         ) : null}
+
+        <div className="mt-4">
+          <h4 className="mb-2 text-sm font-semibold text-slate-200">Задачи уборки на склад</h4>
+          {merchClearingTasks.length === 0 ? (
+            <p className="text-xs text-slate-500">Нет активных заданий на уборку.</p>
+          ) : (
+            <ul className="space-y-1 text-xs text-slate-300">
+              {merchClearingTasks.map((t) => (
+                <li key={t.id} className="rounded border border-violet-700/50 px-2 py-1">
+                  {t.product.name}: {t.quantity} шт. ({t.status})
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         <div className="mt-4">
           <h4 className="mb-2 text-sm font-semibold text-slate-200">Задачи выкладки</h4>

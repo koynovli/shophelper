@@ -87,30 +87,98 @@ def deduct_from_batches(product_id: int, requested_qty: int) -> tuple[int, int |
     return deducted, primary_batch_id
 
 
+def return_to_batch(product_id: int, qty: int, batch_id: int | None) -> int:
+    """Возврат товара с полки на склад (увеличение партии)."""
+    if qty <= 0:
+        return 0
+
+    if batch_id is None:
+        batch_id = peek_fefo_batch_id(product_id)
+        if batch_id is None:
+            raise ValueError("Нет активной партии для возврата товара на склад.")
+
+    batch = ProductBatch.objects.select_for_update().get(pk=batch_id)
+    if batch.product_id != product_id:
+        raise ValueError("Партия не соответствует товару.")
+
+    batch.current_quantity = int(batch.current_quantity) + qty
+    if not batch.is_active:
+        batch.is_active = True
+    batch.save(update_fields=["current_quantity", "is_active"])
+    sync_stock_item_from_batches(product_id)
+    return qty
+
+
+OPEN_PLACEMENT_STATUSES = (
+    PlacementTask.Status.CREATED,
+    PlacementTask.Status.PENDING,
+    PlacementTask.Status.IN_PROGRESS,
+)
+
+
+def _merge_open_placement_task_list(tasks: list[PlacementTask]) -> PlacementTask | None:
+    """Сливает переданные open-задачи одной планограммы в одну."""
+    if not tasks:
+        return None
+    if len(tasks) == 1:
+        return tasks[0]
+
+    tasks.sort(
+        key=lambda task: (
+            0 if task.status == PlacementTask.Status.IN_PROGRESS else 1,
+            task.pk,
+        )
+    )
+    keeper = tasks[0]
+    total_qty = sum(int(task.quantity) for task in tasks)
+    batch_id = keeper.batch_id
+    for task in tasks:
+        if task.batch_id and batch_id is None:
+            batch_id = task.batch_id
+
+    for extra in tasks[1:]:
+        PlacementTask.objects.filter(pk=extra.pk).update(
+            status=PlacementTask.Status.CANCELLED,
+        )
+
+    update_fields = ["quantity"]
+    keeper.quantity = total_qty
+    if keeper.batch_id is None and batch_id is not None:
+        keeper.batch_id = batch_id
+        update_fields.append("batch")
+    keeper.save(update_fields=update_fields)
+    return keeper
+
+
+def _merge_open_placement_tasks(planogram_id: int) -> PlacementTask | None:
+    """Сливает несколько open-задач на одной планограмме в одну."""
+    tasks = list(
+        PlacementTask.objects.select_for_update()
+        .filter(planogram_id=planogram_id, status__in=OPEN_PLACEMENT_STATUSES)
+        .order_by("pk")
+    )
+    return _merge_open_placement_task_list(tasks)
+
+
 def _in_flight_qty(planogram_id: int) -> int:
     return int(
         PlacementTask.objects.filter(
             planogram_id=planogram_id,
-            status__in=(
-                PlacementTask.Status.CREATED,
-                PlacementTask.Status.PENDING,
-                PlacementTask.Status.IN_PROGRESS,
-            ),
+            status__in=OPEN_PLACEMENT_STATUSES,
         ).aggregate(total=Sum("quantity"))["total"]
         or 0
     )
 
 
 def reconcile_slot(slot: EquipmentSlot) -> None:
-    """Проверяет слот по планограмме: триггер 30% и создание задачи CREATED."""
-    pg = (
-        Planogram.objects.filter(slot_id=slot.pk)
-        .select_related("product", "slot", "slot__equipment")
-        .first()
+    """Проверяет все планограммы слота: триггер 30% и создание задачи CREATED."""
+    planograms = Planogram.objects.filter(slot_id=slot.pk).select_related(
+        "product",
+        "slot",
+        "slot__equipment",
     )
-    if pg is None:
-        return
-    reconcile_planogram(pg)
+    for pg in planograms:
+        reconcile_planogram(pg)
 
 
 def reconcile_planogram(planogram: Planogram) -> None:
@@ -129,6 +197,8 @@ def reconcile_planogram(planogram: Planogram) -> None:
         if cap <= 0:
             return
 
+        _merge_open_placement_tasks(pg.pk)
+
         current = int(slot.current_qty)
         if current >= cap * DEFICIT_FILL_RATIO:
             return
@@ -146,20 +216,11 @@ def reconcile_planogram(planogram: Planogram) -> None:
 
         primary_batch_id = peek_fefo_batch_id(pg.product_id)
 
-        open_qs = PlacementTask.objects.select_for_update().filter(
-            planogram_id=pg.pk,
-            status__in=(
-                PlacementTask.Status.CREATED,
-                PlacementTask.Status.PENDING,
-                PlacementTask.Status.IN_PROGRESS,
-            ),
+        existing = (
+            PlacementTask.objects.select_for_update()
+            .filter(planogram_id=pg.pk, status__in=OPEN_PLACEMENT_STATUSES)
+            .first()
         )
-        existing = open_qs.filter(
-            status__in=(PlacementTask.Status.CREATED, PlacementTask.Status.PENDING)
-        ).first()
-        if existing is None:
-            existing = open_qs.filter(status=PlacementTask.Status.IN_PROGRESS).first()
-
         if existing is not None:
             existing.quantity = int(existing.quantity) + add_qty
             if existing.batch_id is None and primary_batch_id is not None:
