@@ -8,7 +8,14 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 
 from .models import PlacementTask, PlacementTaskScan, Product, User
-from .product_units import format_kg, format_quantity, kg_to_grams, product_stores_weight
+from .product_units import (
+    format_kg,
+    format_quantity,
+    kg_to_grams,
+    product_stores_weight,
+    weight_sufficient_threshold_grams,
+    weight_task_scans_sufficient,
+)
 from .scan_service import ScanResolveResult, resolve_scan
 
 if TYPE_CHECKING:
@@ -353,11 +360,13 @@ def ensure_placement_scans_complete(task: PlacementTask) -> None:
     required = int(task.quantity)
     if product_stores_weight(task.product):
         done = scanned_amount_for_task(task)
-        if done < required:
-            raise PlacementScanError(
-                f"Отсканируйте товар: {format_kg(done)} из {format_kg(required)}."
-            )
-        return
+        if weight_task_scans_sufficient(done, required):
+            return
+        threshold = weight_sufficient_threshold_grams(required)
+        raise PlacementScanError(
+            f"Отсканируйте товар: {format_kg(done)} из {format_kg(threshold)} "
+            f"(мин. 80% задачи {format_kg(required)})."
+        )
 
     count = scan_count_for_task(task)
     if count < required:

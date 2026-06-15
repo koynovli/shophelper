@@ -25,13 +25,15 @@ from core.models import (
     SupplyReceivingTask,
     Zone,
 )
-from core.placement_execution import complete_placement_task
+from core.placement_execution import PlacementExecutionError, complete_placement_task
 from core.placement_scan_service import record_placement_scan
 from core.product_units import (
     compute_bulk_density_kg_m3,
     format_quantity,
     grams_to_kg,
     kg_to_grams,
+    weight_sufficient_threshold_grams,
+    weight_task_scans_sufficient,
 )
 from core.spatial_engine import (
     calculate_slot_max_capacity,
@@ -275,6 +277,12 @@ class WeighedProductTests(TestCase):
         item.refresh_from_db()
         self.assertEqual(item.actual_quantity, 3500)
 
+    def test_weight_task_threshold_helpers(self):
+        task_qty = kg_to_grams("2.5")
+        self.assertEqual(weight_sufficient_threshold_grams(task_qty), kg_to_grams("2"))
+        self.assertTrue(weight_task_scans_sufficient(kg_to_grams("2"), task_qty))
+        self.assertFalse(weight_task_scans_sufficient(kg_to_grams("1.9"), task_qty))
+
     def test_placement_weight_scans_sum_to_complete(self):
         batch = ProductBatch.objects.create(
             product=self.product,
@@ -312,14 +320,14 @@ class WeighedProductTests(TestCase):
             self.employee,
             raw_code="",
             store_id=self.store.pk,
-            weight_kg="1.5",
+            weight_kg="1.0",
         )
 
         complete_placement_task(task.pk, self.employee, photo_file=None)
 
         self.slot.refresh_from_db()
-        self.assertEqual(self.slot.current_qty, 2500)
-        self.assertEqual(format_quantity(self.product, self.slot.current_qty), "2.500 кг")
+        self.assertEqual(self.slot.current_qty, 2000)
+        self.assertEqual(format_quantity(self.product, self.slot.current_qty), "2.000 кг")
 
     def test_placement_no_double_grams(self):
         batch = ProductBatch.objects.create(
@@ -350,11 +358,11 @@ class WeighedProductTests(TestCase):
             self.employee,
             raw_code="",
             store_id=self.store.pk,
-            weight_kg="2.5",
+            weight_kg="2.0",
         )
         complete_placement_task(task.pk, self.employee, photo_file=None)
         self.slot.refresh_from_db()
-        self.assertEqual(self.slot.current_qty, 2500)
+        self.assertEqual(self.slot.current_qty, 2000)
 
     def test_create_weight_supply_order_with_quantity_kg(self):
         self.client.force_authenticate(self.admin)
@@ -485,6 +493,73 @@ class WeighedProductTests(TestCase):
                 status=PlacementTask.Status.CREATED,
             ).exists()
         )
+
+    def test_weight_complete_at_80_percent_of_task(self):
+        batch = ProductBatch.objects.create(
+            product=self.product,
+            store=self.store,
+            initial_quantity=10000,
+            current_quantity=10000,
+            expiration_date=date(2099, 12, 31),
+            purchase_price="80.00",
+            is_active=True,
+        )
+        StockItem.objects.update_or_create(product=self.product, defaults={"quantity": 10000})
+        self.slot.current_qty = 0
+        self.slot.save(update_fields=["current_qty"])
+        PlacementTask.objects.filter(planogram=self.planogram).delete()
+        task = PlacementTask.objects.create(
+            planogram=self.planogram,
+            product=self.product,
+            equipment=self.equipment,
+            quantity=kg_to_grams("2.5"),
+            batch=batch,
+            status=PlacementTask.Status.IN_PROGRESS,
+            assigned_to=self.employee,
+        )
+        record_placement_scan(
+            task.pk,
+            self.employee,
+            raw_code="",
+            store_id=self.store.pk,
+            weight_kg="2.0",
+        )
+        complete_placement_task(task.pk, self.employee, photo_file=None)
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.current_qty, 2000)
+
+    def test_weight_complete_rejects_below_80_percent_of_task(self):
+        batch = ProductBatch.objects.create(
+            product=self.product,
+            store=self.store,
+            initial_quantity=10000,
+            current_quantity=10000,
+            expiration_date=date(2099, 12, 31),
+            purchase_price="80.00",
+            is_active=True,
+        )
+        StockItem.objects.update_or_create(product=self.product, defaults={"quantity": 10000})
+        self.slot.current_qty = 0
+        self.slot.save(update_fields=["current_qty"])
+        PlacementTask.objects.filter(planogram=self.planogram).delete()
+        task = PlacementTask.objects.create(
+            planogram=self.planogram,
+            product=self.product,
+            equipment=self.equipment,
+            quantity=kg_to_grams("2.5"),
+            batch=batch,
+            status=PlacementTask.Status.IN_PROGRESS,
+            assigned_to=self.employee,
+        )
+        record_placement_scan(
+            task.pk,
+            self.employee,
+            raw_code="",
+            store_id=self.store.pk,
+            weight_kg="1.9",
+        )
+        with self.assertRaises(PlacementExecutionError):
+            complete_placement_task(task.pk, self.employee, photo_file=None)
 
     def test_task_destination_for_box(self):
         from core.placement_scan_service import format_task_destination

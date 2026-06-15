@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 GRAMS_PER_KG = 1000
 _KG_QUANT = Decimal("0.001")
 WEIGHT_BULK_FILL_FRACTION = 0.55
+WEIGHT_TASK_SUFFICIENT_RATIO = Decimal("0.8")
 MAX_BOX_PLANOGRAM_TARGET_KG = Decimal("100")
 
 
@@ -48,6 +49,22 @@ def product_stores_weight(product: Product | None) -> bool:
     from .models import Product
 
     return getattr(product, "sale_unit", Product.SaleUnit.PIECE) == Product.SaleUnit.WEIGHT
+
+
+def weight_sufficient_threshold_grams(qty: int) -> int:
+    """Минимум (г) для порога 80% от переданного количества."""
+    amount = int(qty or 0)
+    if amount <= 0:
+        return 0
+    pct = int(WEIGHT_TASK_SUFFICIENT_RATIO * 100)
+    return (amount * pct + 99) // 100
+
+
+def weight_task_scans_sufficient(done: int, task_qty: int) -> bool:
+    threshold = weight_sufficient_threshold_grams(task_qty)
+    if threshold <= 0:
+        return True
+    return int(done or 0) >= threshold
 
 
 def kg_to_grams(value: Decimal | str | float | int) -> int:
