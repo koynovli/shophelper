@@ -8,7 +8,12 @@ from django.utils import timezone
 
 from .media_upload import save_task_photo
 from .models import EquipmentSlot, PlacementTask, ProductBatch
-from .placement_scan_service import PlacementScanError, ensure_placement_scans_complete
+from .placement_scan_service import (
+    PlacementScanError,
+    ensure_placement_scans_complete,
+    scanned_amount_for_task,
+)
+from .product_units import format_quantity, product_stores_weight
 from .placement_sync import (
     available_batch_qty,
     deduct_from_batches,
@@ -42,11 +47,13 @@ def _get_task_for_update(task_id: int) -> PlacementTask:
     )
 
 
-def _ensure_batch_availability(product_id: int, qty: int) -> None:
+def _ensure_batch_availability(product_id: int, qty: int, product=None) -> None:
     avail = available_batch_qty(product_id)
     if avail < qty:
+        label = format_quantity(product, qty) if product else f"{qty}"
+        avail_label = format_quantity(product, avail) if product else f"{avail}"
         raise PlacementExecutionError(
-            f"На складе недостаточно годных партий (доступно {avail} из {qty}). "
+            f"На складе недостаточно годных партий (доступно {avail_label} из {label}). "
             "Проверьте приёмку или срок годности партий."
         )
 
@@ -65,7 +72,7 @@ def accept_placement_task(task_id: int, user: AbstractUser) -> PlacementTask:
             raise PlacementExecutionError(
                 "По этой планограмме уже выполняется другая задача выкладки."
             )
-        _ensure_batch_availability(task.product_id, int(task.quantity))
+        _ensure_batch_availability(task.product_id, int(task.quantity), task.product)
         task.assigned_to = user
         task.status = PlacementTask.Status.IN_PROGRESS
         task.save(update_fields=["assigned_to", "status"])
@@ -86,8 +93,19 @@ def complete_placement_task(task_id: int, user: AbstractUser, photo_file) -> Pla
         except PlacementScanError as exc:
             raise PlacementExecutionError(str(exc)) from exc
 
-        qty = int(task.quantity)
-        if task.product.is_marked:
+        if product_stores_weight(task.product):
+            qty = scanned_amount_for_task(task)
+            _ensure_batch_availability(task.product_id, qty, task.product)
+            deducted, primary_batch_id = deduct_from_batches(task.product_id, qty)
+            if deducted < qty:
+                raise PlacementExecutionError(
+                    f"На складе недостаточно годных партий "
+                    f"(доступно {format_quantity(task.product, deducted)} "
+                    f"из {format_quantity(task.product, qty)}). "
+                    "Проверьте приёмку или срок годности партий."
+                )
+        elif task.product.is_marked:
+            qty = int(task.quantity)
             scan_batches = list(
                 task.scans.exclude(batch_id__isnull=True).values_list("batch_id", flat=True)
             )
@@ -101,11 +119,14 @@ def complete_placement_task(task_id: int, user: AbstractUser, photo_file) -> Pla
             sync_stock_item_from_batches(task.product_id)
             primary_batch_id = scan_batches[0] if scan_batches else task.batch_id
         else:
-            _ensure_batch_availability(task.product_id, qty)
+            qty = int(task.quantity)
+            _ensure_batch_availability(task.product_id, qty, task.product)
             deducted, primary_batch_id = deduct_from_batches(task.product_id, qty)
             if deducted < qty:
                 raise PlacementExecutionError(
-                    f"На складе недостаточно годных партий (доступно {deducted} из {qty}). "
+                    f"На складе недостаточно годных партий "
+                    f"(доступно {format_quantity(task.product, deducted)} "
+                    f"из {format_quantity(task.product, qty)}). "
                     "Проверьте приёмку или срок годности партий."
                 )
 

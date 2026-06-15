@@ -86,6 +86,7 @@ from .serializers import (
     SupplierSerializer,
     ReceivingCompleteSerializer,
     SupplyOrderCreateSerializer,
+    SupplyOrderCancelSerializer,
     SupplyOrderListSerializer,
     SupplyOrderSerializer,
     SupplyOrderUpdateSerializer,
@@ -95,6 +96,7 @@ from .serializers import (
     WriteOffTaskReadSerializer,
     ZoneSerializer,
 )
+from .supply_order_service import SupplyOrderError, cancel_supply_order
 from .supply_receiving_service import (
     SupplyReceivingError,
     accept_receiving_task,
@@ -290,6 +292,7 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
         "supplier",
         "created_by",
         "received_by",
+        "cancelled_by",
     )
 
     def get_serializer_class(self):
@@ -309,6 +312,7 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
             "destroy",
             "receive",
             "submit",
+            "cancel",
         ):
             return [IsAuthenticated(), IsRoleAdmin()]
         return [IsAuthenticated()]
@@ -400,6 +404,25 @@ class SupplyOrderViewSet(viewsets.ModelViewSet):
             order, context=self.get_serializer_context()
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        serializer = SupplyOrderCancelSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            order = cancel_supply_order(
+                int(pk),
+                request.user,
+                reason_code=serializer.validated_data["reason_code"],
+                reason_note=serializer.validated_data.get("reason_note", ""),
+            )
+        except SupplyOrderError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        order = self.get_queryset().get(pk=order.pk)
+        return Response(
+            SupplyOrderListSerializer(order, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
@@ -844,8 +867,9 @@ class PlacementTaskViewSet(viewsets.ModelViewSet):
             task, resolved = record_placement_scan(
                 int(pk),
                 request.user,
-                raw_code=serializer.validated_data["raw_code"],
+                raw_code=serializer.validated_data.get("raw_code") or "",
                 store_id=store_id,
+                weight_kg=serializer.validated_data.get("weight_kg"),
             )
         except PlacementScanError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1075,7 +1099,37 @@ class EquipmentSlotAdjustView(APIView):
     permission_classes = [IsAuthenticated, IsRoleAdmin]
 
     def post(self, request, pk: int):
-        delta = int(request.data.get("delta", 0))
+        from decimal import Decimal, ROUND_HALF_UP
+
+        from .product_units import product_stores_weight
+
+        slot = (
+            EquipmentSlot.objects.select_related("equipment")
+            .prefetch_related("planograms__product")
+            .filter(pk=pk)
+            .first()
+        )
+        if slot is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        planogram = slot.planograms.first()
+        product = planogram.product if planogram else None
+        is_weight = product_stores_weight(product)
+
+        delta_kg_raw = request.data.get("delta_kg")
+        if is_weight:
+            if delta_kg_raw is None or str(delta_kg_raw).strip() == "":
+                return Response(
+                    {
+                        "detail": "Для весового товара укажите delta_kg (например, \"-0.250\")."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            kg = Decimal(str(delta_kg_raw))
+            delta = int((kg * Decimal(1000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        else:
+            delta = int(request.data.get("delta", 0))
+
         if delta == 0:
             return Response(
                 {"detail": "Укажите ненулевой delta (отрицательный — продажа)."},
@@ -1086,11 +1140,14 @@ class EquipmentSlotAdjustView(APIView):
         except EquipmentSlot.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
         slot = EquipmentSlot.objects.get(pk=pk)
+        from .product_units import format_quantity
+
         return Response(
             {
                 "id": slot.pk,
                 "current_qty": slot.current_qty,
                 "max_capacity": slot.max_capacity,
+                "current_qty_display": format_quantity(product, slot.current_qty),
             },
         )
 
@@ -1123,10 +1180,22 @@ class EquipmentSlotCapacityPreviewView(APIView):
         if product is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        from .spatial_engine import calculate_slot_max_capacity
+        from .models import Equipment
+        from .product_units import grams_to_kg, product_stores_weight
+        from .spatial_engine import calculate_slot_max_capacity, refresh_slot_max_capacity
 
-        cap = calculate_slot_max_capacity(slot, product)
-        return Response({"max_capacity": cap})
+        is_weight = product_stores_weight(product)
+        if slot.planograms.filter(product=product).exists():
+            cap = refresh_slot_max_capacity(slot, product)
+        else:
+            cap = calculate_slot_max_capacity(slot, product)
+
+        payload = {
+            "max_capacity": cap,
+            "quantity_unit": "kg" if is_weight else "piece",
+            "max_capacity_kg": str(grams_to_kg(cap)) if is_weight else None,
+        }
+        return Response(payload)
 
 
 class PlanogramFilter(filters.FilterSet):

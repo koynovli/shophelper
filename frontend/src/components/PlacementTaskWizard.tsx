@@ -18,10 +18,18 @@ export function PlacementTaskWizard({
   onDone,
   onShowOnMap,
 }: Props): React.ReactElement {
+  const isWeight = task.product?.sale_unit === 'weight';
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [localStatus, setLocalStatus] = useState(task.status);
   const [scansDone, setScansDone] = useState(task.scans_done ?? 0);
+  const [scansDoneDisplay, setScansDoneDisplay] = useState(
+    task.scans_done_display ?? String(task.scans_done ?? 0),
+  );
+  const [scansRequiredDisplay, setScansRequiredDisplay] = useState(
+    task.scans_required_display ?? String(task.scans_required ?? task.quantity ?? 0),
+  );
+  const [weightKg, setWeightKg] = useState('');
   const [chatText, setChatText] = useState('');
   const scansRequired = task.scans_required ?? task.quantity ?? 0;
   const { messages, send: sendChat } = usePlacementTaskChat({
@@ -46,15 +54,33 @@ export function PlacementTaskWizard({
     setError(extractErrorMessage(err, fallback));
   };
 
+  const applyScanResponse = (data: {
+    scans_done?: number;
+    scans_done_display?: string;
+    scans_required_display?: string;
+  }): void => {
+    if (typeof data.scans_done === 'number') {
+      setScansDone(data.scans_done);
+    }
+    if (data.scans_done_display) {
+      setScansDoneDisplay(data.scans_done_display);
+    }
+    if (data.scans_required_display) {
+      setScansRequiredDisplay(data.scans_required_display);
+    }
+  };
+
   const accept = async (): Promise<void> => {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.post<{ scans_done?: number }>(`/placement-tasks/${task.id}/accept/`);
+      const r = await api.post<{
+        scans_done?: number;
+        scans_done_display?: string;
+        scans_required_display?: string;
+      }>(`/placement-tasks/${task.id}/accept/`);
       setLocalStatus('IN_PROGRESS');
-      if (typeof r.data.scans_done === 'number') {
-        setScansDone(r.data.scans_done);
-      }
+      applyScanResponse(r.data);
     } catch (err) {
       handleError(err, 'Не удалось взять задачу.');
     } finally {
@@ -62,14 +88,25 @@ export function PlacementTaskWizard({
     }
   };
 
-  const scanUnit = async (rawCode: string): Promise<void> => {
+  const scanUnit = async (rawCode?: string, manualWeightKg?: string): Promise<void> => {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.post<{ scans_done?: number }>(`/placement-tasks/${task.id}/scan-unit/`, {
-        raw_code: rawCode,
-      });
-      setScansDone(r.data.scans_done ?? scansDone + 1);
+      const payload: Record<string, string | number> = {};
+      if (rawCode?.trim()) {
+        payload.raw_code = rawCode.trim();
+      }
+      const kg = manualWeightKg ?? weightKg;
+      if (isWeight && kg.trim()) {
+        payload.weight_kg = kg.trim();
+      }
+      const r = await api.post<{
+        scans_done?: number;
+        scans_done_display?: string;
+        scans_required_display?: string;
+      }>(`/placement-tasks/${task.id}/scan-unit/`, payload);
+      applyScanResponse(r.data);
+      setWeightKg('');
     } catch (err) {
       handleError(err, 'Скан не принят.');
     } finally {
@@ -130,20 +167,48 @@ export function PlacementTaskWizard({
       {localStatus === 'IN_PROGRESS' ? (
         <>
           <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2 text-xs text-slate-300">
-            Сканов товара: {scansDone} / {scansRequired}
-            {task.product?.is_marked ? ' (каждая единица)' : ''}
+            {isWeight
+              ? `Отложено: ${scansDoneDisplay} / ${scansRequiredDisplay}`
+              : `Сканов товара: ${scansDone} / ${scansRequired}${
+                  task.product?.is_marked ? ' (каждая единица)' : ''
+                }`}
           </div>
 
           {!scansOk ? (
-            <BarcodeScanner
-              onScan={(code) => void scanUnit(code)}
-              disabled={busy}
-              label={
-                task.product?.is_marked
-                  ? 'Скан маркировки (Data Matrix)'
-                  : 'Скан GTIN/EAN товара'
-              }
-            />
+            <>
+              {isWeight ? (
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    min="0.001"
+                    step="0.001"
+                    value={weightKg}
+                    onChange={(e) => setWeightKg(e.target.value)}
+                    placeholder="Вес, кг"
+                    className="min-h-[44px] flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"
+                  />
+                  <button
+                    type="button"
+                    disabled={busy || !weightKg.trim()}
+                    onClick={() => void scanUnit(undefined, weightKg)}
+                    className="rounded-lg bg-sky-700 px-4 text-sm text-white disabled:opacity-50"
+                  >
+                    Добавить
+                  </button>
+                </div>
+              ) : null}
+              <BarcodeScanner
+                onScan={(code) => void scanUnit(code)}
+                disabled={busy}
+                label={
+                  isWeight
+                    ? 'Скан весового EAN-13 или PLU'
+                    : task.product?.is_marked
+                      ? 'Скан маркировки (Data Matrix)'
+                      : 'Скан GTIN/EAN товара'
+                }
+              />
+            </>
           ) : null}
 
           <button
@@ -199,11 +264,8 @@ export function PlacementTaskWizard({
             <button
               type="button"
               disabled={busy || !chatText.trim()}
-              onClick={() => {
-                void sendChat(chatText).then(() => setChatText(''));
-              }}
-              className="rounded-lg bg-slate-700 px-3 py-2 text-slate-100 disabled:opacity-50"
-              aria-label="Отправить"
+              onClick={() => void sendChat(chatText).then(() => setChatText(''))}
+              className="rounded-lg bg-slate-700 px-3 text-sm text-white disabled:opacity-50"
             >
               <Send className="h-4 w-4" />
             </button>
@@ -212,13 +274,14 @@ export function PlacementTaskWizard({
             type="button"
             disabled={busy}
             onClick={() => void reportProblem()}
-            className="flex w-full min-h-[44px] items-center justify-center gap-2 rounded-xl border border-amber-500/50 bg-amber-950/30 px-4 py-2 text-sm font-medium text-amber-100 disabled:opacity-60"
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-500/50 px-3 py-2 text-sm text-amber-100"
           >
-            <AlertTriangle className="h-4 w-4" aria-hidden />
-            Проблема
+            <AlertTriangle className="h-4 w-4" />
+            Проблема на складе
           </button>
         </div>
       ) : null}
     </div>
   );
 }
+

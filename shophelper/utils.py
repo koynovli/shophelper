@@ -123,3 +123,30 @@ def _parse_concatenated(s: str, result: dict[str, Any]) -> None:
         m = re.search(r"17(\d{6})", s)
         if m:
             result["expiry_raw"] = m.group(1)
+
+
+def parse_variable_weight_ean13(code: str) -> dict[str, int | str] | None:
+    """
+    Разбор весового EAN-13 (префикс 20–29, in-store).
+
+    Схема: 2X + PLU(5 цифр) + вес(5 цифр, граммы) + контрольная цифра.
+    Пример: 2312345012507 → PLU 12345, 1250 г (1.250 кг).
+    """
+    digits = "".join(c for c in (code or "") if c.isdigit())
+    if len(digits) != 13:
+        return None
+    prefix = int(digits[0:2])
+    if prefix < 20 or prefix > 29:
+        return None
+    plu = digits[2:7]
+    weight_str = digits[7:12]
+    if not weight_str.isdigit():
+        return None
+    weight_grams = int(weight_str)
+    if weight_grams <= 0:
+        return None
+    return {
+        "plu": plu,
+        "weight_grams": weight_grams,
+        "check_digit": digits[12],
+    }

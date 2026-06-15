@@ -118,12 +118,27 @@ class SupplyOrderAdmin(admin.ModelAdmin):
         "total_cost",
         "created_at",
         "received_at",
+        "cancelled_at",
         "created_by",
         "received_by",
+        "cancelled_by",
     )
     list_filter = ("status", "company", "store", "supplier")
     search_fields = ("store__name", "company__name", "supplier__name")
-    autocomplete_fields = ("company", "store", "supplier", "created_by", "received_by")
+    autocomplete_fields = (
+        "company",
+        "store",
+        "supplier",
+        "created_by",
+        "received_by",
+        "cancelled_by",
+    )
+    readonly_fields = (
+        "cancellation_reason_code",
+        "cancellation_reason_note",
+        "cancelled_at",
+        "cancelled_by",
+    )
     inlines = (SupplyOrderItemInline,)
 
 

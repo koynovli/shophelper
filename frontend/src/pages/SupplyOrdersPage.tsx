@@ -7,14 +7,16 @@ import { DiscrepancyPanel } from '../components/DiscrepancyPanel';
 
 type SupplierRow = { id: number; name: string; inn: string; contact_info?: string };
 
-type ProductRow = { id: number; name: string; sku: string };
+type ProductRow = { id: number; name: string; sku: string; sale_unit?: 'piece' | 'weight' };
 
 type OrderItemRow = {
   id: number;
   product: number;
-  product_detail?: { id: number; name: string; sku: string };
+  product_detail?: { id: number; name: string; sku: string; sale_unit?: 'piece' | 'weight' };
   quantity: number;
+  quantity_kg?: string | null;
   actual_quantity: number;
+  actual_quantity_kg?: string | null;
   purchase_price: string;
   discrepancy_note?: string;
 };
@@ -33,6 +35,7 @@ type SupplyOrderRow = {
   status: string;
   created_at: string;
   received_at: string | null;
+  cancelled_at?: string | null;
   planned_receiving_date?: string | null;
   supplier: number | null;
   supplier_detail?: SupplierRow | null;
@@ -40,6 +43,9 @@ type SupplyOrderRow = {
   total_amount: string;
   total_cost: string;
   has_discrepancies?: boolean;
+  cancellation_reason_code?: string;
+  cancellation_reason_note?: string;
+  cancelled_by_username?: string | null;
   receiving_task?: ReceivingTaskBrief | null;
   items: OrderItemRow[];
 };
@@ -51,7 +57,14 @@ type LineDraft = {
   purchasePrice: string;
 };
 
-type OrderFilter = 'all' | 'draft' | 'ordered' | 'received' | 'discrepancies';
+type OrderFilter = 'all' | 'draft' | 'ordered' | 'received' | 'cancelled' | 'discrepancies';
+
+const CANCELLATION_REASONS: { value: string; label: string }[] = [
+  { value: 'manager_changed_mind', label: 'Управляющий передумал' },
+  { value: 'supplier_unable', label: 'Поставщик не смог поставить' },
+  { value: 'order_error', label: 'Ошибка в заказе' },
+  { value: 'other', label: 'Другое' },
+];
 
 const STATUS_LABELS: Record<string, string> = {
   draft: 'Черновик',
@@ -144,6 +157,43 @@ function parseApiError(err: unknown, fallback: string): string {
   return fallback;
 }
 
+type OrderItemPayload =
+  | { product: number; quantity: number; purchase_price: string }
+  | { product: number; quantity_kg: string; purchase_price: string };
+
+function isWeightProduct(
+  product: ProductRow | undefined,
+  item?: OrderItemRow,
+): boolean {
+  if (product?.sale_unit === 'weight') {
+    return true;
+  }
+  if (item?.product_detail?.sale_unit === 'weight') {
+    return true;
+  }
+  return item?.quantity_kg != null;
+}
+
+function formatOrderQuantity(item: OrderItemRow, field: 'ordered' | 'actual'): string {
+  const isWeight = isWeightProduct(undefined, item);
+  if (isWeight) {
+    const kg =
+      field === 'ordered'
+        ? item.quantity_kg ?? String((item.quantity || 0) / 1000)
+        : item.actual_quantity_kg ?? String((item.actual_quantity || 0) / 1000);
+    return `${kg} кг`;
+  }
+  const qty = field === 'ordered' ? item.quantity : item.actual_quantity;
+  return `${qty} шт.`;
+}
+
+function cancellationReasonLabel(code: string | undefined): string {
+  if (!code) {
+    return '—';
+  }
+  return CANCELLATION_REASONS.find((r) => r.value === code)?.label ?? code;
+}
+
 export function SupplyOrdersPage(): React.ReactElement {
   const [orders, setOrders] = useState<SupplyOrderRow[]>([]);
   const [suppliers, setSuppliers] = useState<SupplierRow[]>([]);
@@ -163,6 +213,9 @@ export function SupplyOrdersPage(): React.ReactElement {
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [receivingAssigneeId, setReceivingAssigneeId] = useState('');
   const [plannedReceivingDate, setPlannedReceivingDate] = useState('');
+  const [cancellingOrderId, setCancellingOrderId] = useState<number | null>(null);
+  const [cancelReasonCode, setCancelReasonCode] = useState('manager_changed_mind');
+  const [cancelReasonNote, setCancelReasonNote] = useState('');
 
   const load = useCallback(async (): Promise<void> => {
     setError(null);
@@ -224,7 +277,9 @@ export function SupplyOrdersPage(): React.ReactElement {
       order.items.map((item) => ({
         key: String(item.id),
         productId: String(item.product),
-        quantity: String(item.quantity),
+        quantity: isWeightProduct(undefined, item)
+          ? item.quantity_kg ?? String((item.quantity || 0) / 1000)
+          : String(item.quantity),
         purchasePrice: String(item.purchase_price),
       })),
     );
@@ -261,19 +316,29 @@ export function SupplyOrdersPage(): React.ReactElement {
     }
   };
 
-  const buildItemsPayload = (): { product: number; quantity: number; purchase_price: string }[] | null => {
-    const items: { product: number; quantity: number; purchase_price: string }[] = [];
+  const buildItemsPayload = (): OrderItemPayload[] | null => {
+    const items: OrderItemPayload[] = [];
     for (const line of lines) {
       if (!line.productId) {
         continue;
       }
-      const qty = Math.max(1, Math.floor(Number(line.quantity) || 0));
+      const product = products.find((p) => p.id === Number(line.productId));
       const price = line.purchasePrice.trim() || '0';
-      items.push({
-        product: Number(line.productId),
-        quantity: qty,
-        purchase_price: price,
-      });
+      if (isWeightProduct(product)) {
+        const kg = Math.max(0.001, Number(line.quantity) || 0);
+        items.push({
+          product: Number(line.productId),
+          quantity_kg: String(kg),
+          purchase_price: price,
+        });
+      } else {
+        const qty = Math.max(1, Math.floor(Number(line.quantity) || 0));
+        items.push({
+          product: Number(line.productId),
+          quantity: qty,
+          purchase_price: price,
+        });
+      }
     }
     if (items.length === 0) {
       return null;
@@ -282,7 +347,7 @@ export function SupplyOrdersPage(): React.ReactElement {
   };
 
   const buildOrderBody = (
-    items: { product: number; quantity: number; purchase_price: string }[],
+    items: OrderItemPayload[],
   ): {
     items: typeof items;
     supplier?: number;
@@ -428,6 +493,45 @@ export function SupplyOrdersPage(): React.ReactElement {
     }
   };
 
+  const openCancelDialog = (orderId: number): void => {
+    setCancellingOrderId(orderId);
+    setCancelReasonCode('manager_changed_mind');
+    setCancelReasonNote('');
+    setError(null);
+    setSuccess(null);
+  };
+
+  const closeCancelDialog = (): void => {
+    setCancellingOrderId(null);
+    setCancelReasonCode('manager_changed_mind');
+    setCancelReasonNote('');
+  };
+
+  const confirmCancelOrder = async (): Promise<void> => {
+    if (cancellingOrderId === null) {
+      return;
+    }
+    if (cancelReasonCode === 'other' && !cancelReasonNote.trim()) {
+      setError('Для причины «Другое» укажите комментарий.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`/supply-orders/${cancellingOrderId}/cancel/`, {
+        reason_code: cancelReasonCode,
+        reason_note: cancelReasonNote.trim(),
+      });
+      setSuccess(`Заказ #${cancellingOrderId} отменён.`);
+      closeCancelDialog();
+      await load();
+    } catch (err) {
+      setError(parseApiError(err, 'Не удалось отменить заказ.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const getSupplierName = (order: SupplyOrderRow): string =>
     order.supplier_detail?.name ??
     (order.supplier !== null ? `Поставщик #${order.supplier}` : 'Не указан');
@@ -447,6 +551,7 @@ export function SupplyOrdersPage(): React.ReactElement {
     { key: 'draft', label: 'Черновики' },
     { key: 'ordered', label: 'В пути' },
     { key: 'received', label: 'Приняты' },
+    { key: 'cancelled', label: 'Отменённые' },
     { key: 'discrepancies', label: 'С расхождениями' },
   ];
 
@@ -598,7 +703,10 @@ export function SupplyOrdersPage(): React.ReactElement {
         </p>
 
         <div className="space-y-3">
-          {lines.map((line, idx) => (
+          {lines.map((line, idx) => {
+            const lineProduct = products.find((p) => p.id === Number(line.productId));
+            const isWeight = isWeightProduct(lineProduct);
+            return (
             <div
               key={line.key}
               className="grid gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-3 sm:grid-cols-[1fr_100px_120px_auto]"
@@ -616,14 +724,15 @@ export function SupplyOrdersPage(): React.ReactElement {
                 <option value="">Товар…</option>
                 {products.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} ({p.sku})
+                    {p.name} ({p.sku}){p.sale_unit === 'weight' ? ' — кг' : ''}
                   </option>
                 ))}
               </select>
               <input
                 type="number"
-                min={1}
-                placeholder="Кол-во"
+                min={isWeight ? 0.001 : 1}
+                step={isWeight ? 0.001 : 1}
+                placeholder={isWeight ? 'Кг' : 'Шт.'}
                 value={line.quantity}
                 onChange={(e) => {
                   const v = e.target.value;
@@ -635,7 +744,7 @@ export function SupplyOrdersPage(): React.ReactElement {
               />
               <input
                 type="text"
-                placeholder="Цена закупки"
+                placeholder={isWeight ? '₽/кг' : '₽/шт'}
                 value={line.purchasePrice}
                 onChange={(e) => {
                   const v = e.target.value;
@@ -655,7 +764,8 @@ export function SupplyOrdersPage(): React.ReactElement {
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
@@ -792,6 +902,35 @@ export function SupplyOrdersPage(): React.ReactElement {
                       ) : null}
                     </div>
                   </>
+                ) : order.status === 'cancelled' ? (
+                  <>
+                    <div>
+                      Сумма заказа:{' '}
+                      <strong className="text-slate-100">{order.total_amount} ₽</strong>
+                    </div>
+                    <div className="text-rose-300">
+                      Отменён:{' '}
+                      <strong className="text-rose-100">
+                        {formatDate(order.cancelled_at ?? null)}
+                      </strong>
+                    </div>
+                    <div>
+                      Причина:{' '}
+                      <strong className="text-slate-100">
+                        {cancellationReasonLabel(order.cancellation_reason_code)}
+                      </strong>
+                    </div>
+                    {order.cancellation_reason_note?.trim() ? (
+                      <div className="text-slate-400">
+                        Комментарий: {order.cancellation_reason_note.trim()}
+                      </div>
+                    ) : null}
+                    {order.cancelled_by_username ? (
+                      <div className="text-slate-400">
+                        Кем отменён: {order.cancelled_by_username}
+                      </div>
+                    ) : null}
+                  </>
                 ) : (
                   <div>
                     Сумма заказа:{' '}
@@ -828,7 +967,10 @@ export function SupplyOrdersPage(): React.ReactElement {
                   </tr>
                 </thead>
                 <tbody>
-                  {order.items.map((item) => (
+                  {order.items.map((item) => {
+                    const isWeight = isWeightProduct(undefined, item);
+                    const priceSuffix = isWeight ? ' ₽/кг' : ' ₽';
+                    return (
                     <tr key={item.id} className="border-b border-slate-800/80">
                       <td className="py-1.5 pr-2 text-slate-100">
                         {item.product_detail?.name ?? `#${item.product}`}
@@ -836,19 +978,30 @@ export function SupplyOrdersPage(): React.ReactElement {
                       <td className="py-1.5 pr-2">{item.product_detail?.sku ?? '—'}</td>
                       {order.status === 'received' && !order.has_discrepancies ? (
                         <>
-                          <td className="py-1.5 pr-2 text-right">{item.quantity}</td>
-                          <td className="py-1.5 pr-2 text-right">{item.actual_quantity}</td>
+                          <td className="py-1.5 pr-2 text-right">
+                            {formatOrderQuantity(item, 'ordered')}
+                          </td>
+                          <td className="py-1.5 pr-2 text-right">
+                            {formatOrderQuantity(item, 'actual')}
+                          </td>
                         </>
                       ) : order.status === 'received' ? (
                         <td className="py-1.5 pr-2 text-right">
-                          {item.quantity} → {item.actual_quantity}
+                          {formatOrderQuantity(item, 'ordered')} →{' '}
+                          {formatOrderQuantity(item, 'actual')}
                         </td>
                       ) : (
-                        <td className="py-1.5 pr-2 text-right">{item.quantity}</td>
+                        <td className="py-1.5 pr-2 text-right">
+                          {formatOrderQuantity(item, 'ordered')}
+                        </td>
                       )}
-                      <td className="py-1.5 text-right">{item.purchase_price}</td>
+                      <td className="py-1.5 text-right">
+                        {item.purchase_price}
+                        {priceSuffix}
+                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
 
@@ -878,6 +1031,74 @@ export function SupplyOrdersPage(): React.ReactElement {
                   >
                     Удалить
                   </button>
+                </div>
+              ) : null}
+
+              {order.status === 'ordered' ? (
+                <div className="border-t border-slate-800 pt-4">
+                  {cancellingOrderId === order.id ? (
+                    <div className="rounded-lg border border-rose-500/30 bg-rose-950/20 p-3">
+                      <h4 className="mb-3 text-sm font-medium text-rose-100">
+                        Отмена заказа #{order.id}
+                      </h4>
+                      <label className="mb-3 block text-sm text-slate-300">
+                        Причина
+                        <select
+                          value={cancelReasonCode}
+                          onChange={(e) => setCancelReasonCode(e.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+                        >
+                          {CANCELLATION_REASONS.map((reason) => (
+                            <option key={reason.value} value={reason.value}>
+                              {reason.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="mb-3 block text-sm text-slate-300">
+                        Комментарий
+                        {cancelReasonCode === 'other' ? (
+                          <span className="text-rose-300"> (обязательно)</span>
+                        ) : (
+                          <span className="text-slate-500"> (необязательно)</span>
+                        )}
+                        <textarea
+                          value={cancelReasonNote}
+                          onChange={(e) => setCancelReasonNote(e.target.value)}
+                          rows={2}
+                          placeholder="Дополнительные детали…"
+                          className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"
+                        />
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => void confirmCancelOrder()}
+                          className="rounded-lg bg-rose-600 px-3 py-1.5 text-sm text-white hover:bg-rose-500 disabled:opacity-50"
+                        >
+                          {saving ? 'Отмена…' : 'Подтвердить отмену'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={closeCancelDialog}
+                          className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                        >
+                          Назад
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => openCancelDialog(order.id)}
+                      className="rounded-lg border border-rose-600/50 px-3 py-1.5 text-sm text-rose-200 hover:bg-rose-950/40 disabled:opacity-50"
+                    >
+                      Отменить заказ
+                    </button>
+                  )}
                 </div>
               ) : null}
             </article>

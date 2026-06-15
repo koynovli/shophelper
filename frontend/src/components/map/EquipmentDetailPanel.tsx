@@ -10,13 +10,14 @@ import {
 import type { EquipmentSlot, FloorEquipment } from '../../types/floorPlan';
 import { normalizeEquipmentType, slotFillMetrics } from '../../types/floorPlan';
 
-type ProductBrief = { id: number; name: string; sku: string };
+type ProductBrief = { id: number; name: string; sku: string; sale_unit?: 'piece' | 'weight' };
 
 type MerchTaskRow = {
   id: number;
   quantity: number;
+  quantity_display?: string;
   status: string;
-  product: { id: number; name: string; sku: string };
+  product: { id: number; name: string; sku: string; sale_unit?: 'piece' | 'weight' };
   slot_info?: { id: number; row_index: number; col_index: number } | null;
 };
 
@@ -38,6 +39,7 @@ type Props = {
   merchTargetQty: number;
   onMerchTargetQtyChange: (qty: number) => void;
   merchSlotCapacity: number | null;
+  merchQuantityUnit?: 'piece' | 'kg';
   onAutoCalculateTarget: () => void;
   onSavePlanogram: () => void;
   onSimulateSale: () => void;
@@ -67,6 +69,7 @@ export function EquipmentDetailPanel({
   merchTargetQty,
   onMerchTargetQtyChange,
   merchSlotCapacity,
+  merchQuantityUnit = 'piece',
   onAutoCalculateTarget,
   onSavePlanogram,
   onSimulateSale,
@@ -92,6 +95,9 @@ export function EquipmentDetailPanel({
   const eqType = equipment ? normalizeEquipmentType(String(equipment.type)) : 'shelf';
   const layoutMode = equipment ? getLayoutMode(String(equipment.type)) : 'grid';
   const isMannequin = eqType === 'mannequin';
+  const isWeight = merchQuantityUnit === 'kg';
+  const selectedMerchProduct = merchProducts.find((p) => String(p.id) === merchProductId);
+  const slotSaleUnit = selectedSlot?.planogram?.product?.sale_unit ?? selectedMerchProduct?.sale_unit;
 
   const rowGroups = useMemo(() => {
     const rows = new Map<number, EquipmentSlot[]>();
@@ -171,7 +177,7 @@ export function EquipmentDetailPanel({
                       .map((slot) => {
                         const isActive = slot.id === selectedSlotId;
                         const isFocused = slot.id === focusedSlotId;
-                        const fill = slotFillMetrics(slot);
+                        const fill = slotFillMetrics(slot, slot.planogram?.product?.sale_unit);
                         const replStatus = slot.planogram?.replenishment_status;
                         const statusClass =
                           fill.below30 || replStatus === 'DEFICIT'
@@ -205,7 +211,7 @@ export function EquipmentDetailPanel({
                                   {slot.planogram.product.name}
                                 </div>
                                 <div className="text-[10px] text-sky-100">
-                                  {fill.current}/{fill.cap || '—'}
+                                  {fill.currentLabel}/{fill.capLabel}
                                 </div>
                               </>
                             ) : (
@@ -238,8 +244,10 @@ export function EquipmentDetailPanel({
                   </p>
                   <p>
                     <span className="text-slate-500">Остаток: </span>
-                    {slotFillMetrics(selectedSlot).current}/
-                    {slotFillMetrics(selectedSlot).cap || '—'}
+                    {(() => {
+                      const fill = slotFillMetrics(selectedSlot, slotSaleUnit);
+                      return `${fill.currentLabel}/${fill.capLabel}`;
+                    })()}
                   </p>
                 </div>
               ) : (
@@ -271,17 +279,23 @@ export function EquipmentDetailPanel({
                   </label>
                   <div className="flex flex-wrap items-end gap-2">
                     <label className="min-w-[8rem] flex-1 text-sm text-slate-300">
-                      Цель, шт.
+                      {isWeight ? 'Цель, кг' : 'Цель, шт.'}
                       <input
                         type="number"
-                        min={1}
+                        min={isWeight ? 0.001 : 1}
+                        step={isWeight ? 0.001 : 1}
                         max={isMannequin ? 1 : undefined}
                         value={merchTargetQty}
-                        onChange={(e) =>
-                          onMerchTargetQtyChange(
-                            Math.max(1, isMannequin ? 1 : Number(e.target.value) || 1),
-                          )
-                        }
+                        onChange={(e) => {
+                          const raw = Number(e.target.value);
+                          if (isWeight) {
+                            onMerchTargetQtyChange(Math.max(0.001, raw || 0.001));
+                          } else {
+                            onMerchTargetQtyChange(
+                              Math.max(1, isMannequin ? 1 : Math.floor(raw) || 1),
+                            );
+                          }
+                        }}
                         disabled={isMannequin}
                         className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-2 text-white disabled:opacity-60"
                       />
@@ -289,17 +303,28 @@ export function EquipmentDetailPanel({
                     <button
                       type="button"
                       disabled={
-                        merchSaving || merchLoading || !merchProductId || merchProducts.length === 0
+                        merchSaving ||
+                        merchLoading ||
+                        !merchProductId ||
+                        merchProducts.length === 0 ||
+                        isWeight
                       }
                       onClick={onAutoCalculateTarget}
                       className="rounded-md border border-sky-500/60 px-3 py-2 text-xs text-sky-100 disabled:opacity-50"
+                      title={isWeight ? 'Для весовых товаров задайте целевой вес вручную' : undefined}
                     >
                       Авторассчёт
                     </button>
                   </div>
                   <p className="text-[11px] text-slate-500">
-                    Вместимость слота:{' '}
-                    {merchSlotCapacity != null && merchSlotCapacity > 0 ? merchSlotCapacity : '—'}
+                    {isWeight ? 'Макс. по объёму: ' : 'Вместимость слота: '}
+                    {merchSlotCapacity != null && merchSlotCapacity > 0
+                      ? isWeight
+                        ? `${(merchSlotCapacity / 1000).toFixed(3).replace(/\.?0+$/, '')} кг`
+                        : `${merchSlotCapacity} шт.`
+                      : isWeight
+                        ? 'укажите плотность в каталоге'
+                        : '—'}
                   </p>
                   {isMannequin ? (
                     <p className="text-[11px] text-slate-500">На зону экспозиции — максимум 1 ед.</p>
@@ -320,7 +345,7 @@ export function EquipmentDetailPanel({
                     onClick={onSimulateSale}
                     className="rounded-md border border-amber-500/60 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-50"
                   >
-                    Продажа −1
+                    {isWeight ? 'Продажа −0.250 кг' : 'Продажа −1'}
                   </button>
                   <button
                     type="button"
@@ -360,7 +385,7 @@ export function EquipmentDetailPanel({
             <ul className="space-y-1 text-xs text-slate-300">
               {merchClearingTasks.map((t) => (
                 <li key={t.id} className="rounded border border-violet-700/50 px-2 py-1">
-                  {t.product.name}: {t.quantity} шт. ({t.status})
+                  {t.product.name}: {t.quantity_display ?? `${t.quantity} шт.`} ({t.status})
                 </li>
               ))}
             </ul>
@@ -385,7 +410,7 @@ export function EquipmentDetailPanel({
                       : 'border-slate-700'
                   }`}
                 >
-                  {t.product.name}: {t.quantity} шт.
+                  {t.product.name}: {t.quantity_display ?? `${t.quantity} шт.`}
                   {isHighlighted ? (
                     <span className="ml-1 text-[10px] font-semibold uppercase text-violet-200">
                       ваша задача

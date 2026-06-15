@@ -251,3 +251,122 @@ class SupplyOrderApiTests(TestCase):
             format="json",
         )
         assert resp.status_code == 400
+
+    def _create_ordered(self):
+        self.client.force_authenticate(self.admin)
+        return self.client.post("/api/supply-orders/", self.order_payload, format="json")
+
+    def test_cancel_ordered_supply_order(self):
+        from core.models import SupplyReceivingTask
+
+        create_resp = self._create_ordered()
+        order_id = create_resp.data["id"]
+        cancel_resp = self.client.post(
+            f"/api/supply-orders/{order_id}/cancel/",
+            {
+                "reason_code": "supplier_unable",
+                "reason_note": "Нет на складе поставщика",
+            },
+            format="json",
+        )
+        assert cancel_resp.status_code == 200
+        order = SupplyOrder.objects.get(pk=order_id)
+        assert order.status == SupplyOrder.Status.CANCELLED
+        assert order.cancellation_reason_code == "supplier_unable"
+        assert order.cancellation_reason_note == "Нет на складе поставщика"
+        assert order.cancelled_by_id == self.admin.pk
+        assert order.cancelled_at is not None
+        task = SupplyReceivingTask.objects.get(supply_order_id=order_id)
+        assert task.status == SupplyReceivingTask.Status.CANCELLED
+        assert cancel_resp.data["cancellation_reason_code"] == "supplier_unable"
+
+    def test_cancel_requires_admin(self):
+        create_resp = self._create_ordered()
+        order_id = create_resp.data["id"]
+        self.client.force_authenticate(self.employee)
+        resp = self.client.post(
+            f"/api/supply-orders/{order_id}/cancel/",
+            {"reason_code": "manager_changed_mind"},
+            format="json",
+        )
+        assert resp.status_code == 403
+
+    def test_cannot_cancel_received_or_draft(self):
+        draft_resp = self._create_draft()
+        draft_cancel = self.client.post(
+            f"/api/supply-orders/{draft_resp.data['id']}/cancel/",
+            {"reason_code": "manager_changed_mind"},
+            format="json",
+        )
+        assert draft_cancel.status_code == 400
+
+        create_resp = self._create_ordered()
+        order_id = create_resp.data["id"]
+        from core.models import SupplyReceivingTask
+
+        task = SupplyReceivingTask.objects.get(supply_order_id=order_id)
+        item_id = create_resp.data["items"][0]["id"]
+        mfg = (timezone.now().date() - timedelta(days=2)).isoformat()
+        self.client.force_authenticate(self.employee)
+        self.client.post(f"/api/receiving-tasks/{task.pk}/accept/")
+        self.client.post(
+            f"/api/receiving-tasks/{task.pk}/complete/",
+            {
+                "lines": [
+                    {
+                        "item_id": item_id,
+                        "manufacture_date": mfg,
+                        "actual_quantity": 10,
+                    }
+                ]
+            },
+            format="json",
+        )
+        self.client.force_authenticate(self.admin)
+        received_cancel = self.client.post(
+            f"/api/supply-orders/{order_id}/cancel/",
+            {"reason_code": "manager_changed_mind"},
+            format="json",
+        )
+        assert received_cancel.status_code == 400
+
+    def test_cancel_other_requires_note(self):
+        create_resp = self._create_ordered()
+        order_id = create_resp.data["id"]
+        resp = self.client.post(
+            f"/api/supply-orders/{order_id}/cancel/",
+            {"reason_code": "other", "reason_note": ""},
+            format="json",
+        )
+        assert resp.status_code == 400
+
+    def test_receiving_blocked_after_cancel(self):
+        from core.models import SupplyReceivingTask
+
+        create_resp = self._create_ordered()
+        order_id = create_resp.data["id"]
+        item_id = create_resp.data["items"][0]["id"]
+        task = SupplyReceivingTask.objects.get(supply_order_id=order_id)
+        self.client.post(
+            f"/api/supply-orders/{order_id}/cancel/",
+            {"reason_code": "manager_changed_mind"},
+            format="json",
+        )
+        self.client.force_authenticate(self.employee)
+        accept_resp = self.client.post(f"/api/receiving-tasks/{task.pk}/accept/")
+        assert accept_resp.status_code == 400
+        mfg = (timezone.now().date() - timedelta(days=2)).isoformat()
+        complete_resp = self.client.post(
+            f"/api/receiving-tasks/{task.pk}/complete/",
+            {
+                "lines": [
+                    {
+                        "item_id": item_id,
+                        "manufacture_date": mfg,
+                        "actual_quantity": 10,
+                    }
+                ]
+            },
+            format="json",
+        )
+        assert complete_resp.status_code == 400

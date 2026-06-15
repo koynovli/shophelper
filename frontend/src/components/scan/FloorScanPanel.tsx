@@ -12,8 +12,11 @@ type ScanCheckResponse = {
     id: number;
     destination: string;
     quantity: number;
+    quantity_display?: string;
     scans_done?: number;
     scans_required?: number;
+    scans_done_display?: string;
+    scans_required_display?: string;
   };
 };
 
@@ -58,7 +61,8 @@ export function FloorScanPanel(): React.ReactElement {
         <div className="rounded-lg border border-indigo-400/40 bg-indigo-900/30 px-3 py-3 text-sm text-indigo-50">
           <p className="font-medium">{result.message}</p>
           <p className="mt-1 text-xs text-indigo-200/80">
-            Задача #{result.best_task.id} · {result.best_task.quantity} шт.
+            Задача #{result.best_task.id} ·{' '}
+            {result.best_task.quantity_display ?? `${result.best_task.quantity} шт.`}
           </p>
         </div>
       ) : null}

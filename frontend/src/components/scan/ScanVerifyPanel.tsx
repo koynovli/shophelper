@@ -9,8 +9,22 @@ type ScanCheckResponse = {
   matches_picking: boolean;
   message: string;
   product: { id: number; name: string; is_marked: boolean } | null;
-  suggested_tasks: Array<{ id: number; quantity: number; destination: string }>;
-  best_task?: { id: number; destination: string; quantity: number };
+  suggested_tasks: Array<{
+    id: number;
+    quantity: number;
+    quantity_display?: string;
+    destination: string;
+  }>;
+  best_task?: {
+    id: number;
+    destination: string;
+    quantity: number;
+    quantity_display?: string;
+    scans_done?: number;
+    scans_required?: number;
+    scans_done_display?: string;
+    scans_required_display?: string;
+  };
 };
 
 export function ScanVerifyPanel(): React.ReactElement {
@@ -63,7 +77,7 @@ export function ScanVerifyPanel(): React.ReactElement {
                 <ul className="mt-2 space-y-1 text-xs opacity-90">
                   {result.suggested_tasks.map((t) => (
                     <li key={t.id}>
-                      Задача #{t.id}: {t.quantity} шт. → {t.destination}
+                      Задача #{t.id}: {t.quantity_display ?? `${t.quantity} шт.`} → {t.destination}
                     </li>
                   ))}
                 </ul>

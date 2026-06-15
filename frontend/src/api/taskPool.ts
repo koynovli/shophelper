@@ -17,12 +17,22 @@ export type TaskPoolItem = {
   reason?: string;
   batch_id?: number | null;
   batch_expiration?: string | null;
-  product?: { id: number; name: string; sku: string; gtin?: string | null; is_marked?: boolean };
+  product?: {
+    id: number;
+    name: string;
+    sku: string;
+    gtin?: string | null;
+    is_marked?: boolean;
+    sale_unit?: 'piece' | 'weight';
+  };
   equipment?: { id: number; name: string } | null;
   quantity?: number;
   slot_info?: { id: number; row_index: number; col_index: number } | null;
   scans_done?: number;
   scans_required?: number;
+  scans_done_display?: string;
+  scans_required_display?: string;
+  quantity_display?: string;
   photo_url?: string | null;
   description?: string;
   zone?: string | null;

@@ -6,10 +6,12 @@ from rest_framework.test import APIClient
 
 from core.equipment_profiles import (
     MANNEQUIN_ZONE_LABELS,
+    box_naval_fill_height_cm,
     default_rows_count,
     default_slots_spec,
     layout_mode,
     needs_shelves,
+    shelf_dimensions_for_equipment,
 )
 from core.models import Category, Equipment, EquipmentSlot, Planogram, Product, Shelf, Store, Zone
 from core.spatial_engine import calculate_slot_max_capacity
@@ -57,6 +59,17 @@ class EquipmentProfileTests(TestCase):
         self.assertEqual(len(slots), 1)
         self.assertEqual(slots[0].width_percent, 100.0)
         self.assertEqual(layout_mode(equipment.type), "single")
+
+    def test_box_shelf_dimensions_use_footprint_not_width_as_height(self):
+        equipment = self._create_equipment(Equipment.EquipmentType.BOX, rows_count=1)
+        equipment.width = 120
+        equipment.height = 60
+        equipment.save(update_fields=["width", "height"])
+        dims = shelf_dimensions_for_equipment(equipment, 1)
+        self.assertEqual(dims["width"], 120.0)
+        self.assertEqual(dims["depth"], 60.0)
+        self.assertEqual(dims["height"], box_naval_fill_height_cm(equipment))
+        self.assertLess(dims["height"], 60.0)
 
     def test_mannequin_generates_three_zones_without_shelves(self):
         equipment = self._create_equipment(Equipment.EquipmentType.MANNEQUIN, rows_count=3)

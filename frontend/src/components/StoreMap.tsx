@@ -58,6 +58,21 @@ import {
 import { MapEquipmentMerchItem } from './map/MapEquipmentMerchItem';
 import { MapEquipmentItem } from './MapEquipmentItem';
 
+function parseApiError(err: unknown, fallback: string): string {
+  const ax = err as AxiosError<Record<string, string[] | string> & { detail?: string }>;
+  const data = ax.response?.data;
+  if (data?.detail && typeof data.detail === 'string') {
+    return data.detail;
+  }
+  if (data) {
+    const first = Object.values(data).flat()[0];
+    if (typeof first === 'string') {
+      return first;
+    }
+  }
+  return fallback;
+}
+
 /** Пикселей на 1 см координат из БД (10 px = 1 см на карте) */
 const PX_PER_CM = 10;
 
@@ -137,16 +152,24 @@ type ProductBrief = {
   id: number;
   name: string;
   sku: string;
+  sale_unit?: 'piece' | 'weight';
   allowed_equipment_types?: string[];
 };
 
 type MerchTaskRow = {
   id: number;
   quantity: number;
+  quantity_display?: string;
   status: string;
-  product: { id: number; name: string; sku: string };
+  product: { id: number; name: string; sku: string; sale_unit?: 'piece' | 'weight' };
   equipment: { id: number; name: string };
   slot_info?: { id: number; row_index: number; col_index: number } | null;
+};
+
+type SlotCapacityPreview = {
+  max_capacity: number;
+  quantity_unit: 'piece' | 'kg';
+  max_capacity_kg: string | null;
 };
 
 function equipmentLayoutWouldChange(
@@ -276,6 +299,7 @@ function StoreMap({
   const [merchProductId, setMerchProductId] = useState('');
   const [merchTargetQty, setMerchTargetQty] = useState(1);
   const [merchSlotCapacity, setMerchSlotCapacity] = useState<number | null>(null);
+  const [merchQuantityUnit, setMerchQuantityUnit] = useState<'piece' | 'kg'>('piece');
   const [merchLoading, setMerchLoading] = useState(false);
   const [merchSaving, setMerchSaving] = useState(false);
   const [merchFeedback, setMerchFeedback] = useState<{
@@ -1102,12 +1126,16 @@ function StoreMap({
   }, []);
 
   const fetchSlotCapacityPreview = useCallback(
-    async (slotId: number, productId: number): Promise<number | null> => {
+    async (slotId: number, productId: number): Promise<SlotCapacityPreview | null> => {
       try {
-        const r = await api.get<{ max_capacity: number }>(`/slots/${slotId}/capacity-preview/`, {
+        const r = await api.get<SlotCapacityPreview>(`/slots/${slotId}/capacity-preview/`, {
           params: { product: productId },
         });
-        return Math.max(0, Number(r.data.max_capacity) || 0);
+        return {
+          max_capacity: Math.max(0, Number(r.data.max_capacity) || 0),
+          quantity_unit: r.data.quantity_unit === 'kg' ? 'kg' : 'piece',
+          max_capacity_kg: r.data.max_capacity_kg ?? null,
+        };
       } catch {
         return null;
       }
@@ -1170,21 +1198,29 @@ function StoreMap({
     if (!selectedSlot?.planogram || !merchEquipmentId) {
       return;
     }
+    const product = merchProducts.find((p) => p.id === selectedSlot.planogram!.product.id);
+    const isWeight = product?.sale_unit === 'weight';
     setMerchSaving(true);
     setMerchFeedback(null);
     try {
-      await api.post(`/slots/${selectedSlot.id}/adjust-qty/`, { delta: -1 });
+      if (isWeight) {
+        await api.post(`/slots/${selectedSlot.id}/adjust-qty/`, { delta_kg: '-0.250' });
+      } else {
+        await api.post(`/slots/${selectedSlot.id}/adjust-qty/`, { delta: -1 });
+      }
       await fetchMerchData(merchEquipmentId);
       setMerchFeedback({
         type: 'ok',
-        text: 'Продажа −1: остаток на слоте уменьшен. При заполнении < 30% создаётся задача CREATED.',
+        text: isWeight
+          ? 'Продажа −0.250 кг: остаток на слоте уменьшен. При заполнении < 30% создаётся задача CREATED.'
+          : 'Продажа −1: остаток на слоте уменьшен. При заполнении < 30% создаётся задача CREATED.',
       });
     } catch {
       setMerchFeedback({ type: 'err', text: 'Не удалось симулировать продажу.' });
     } finally {
       setMerchSaving(false);
     }
-  }, [selectedSlot, merchEquipmentId, fetchMerchData]);
+  }, [selectedSlot, merchEquipmentId, fetchMerchData, merchProducts]);
 
   const openMerchModal = useCallback(
     (equipment: FloorEquipment, preferredSlotId?: number | null): void => {
@@ -1233,12 +1269,17 @@ function StoreMap({
       return;
     }
     setMerchProductId(String(selectedSlot.planogram.product.id));
-    setMerchTargetQty(selectedSlot.planogram.target_quantity);
+    const product = merchProducts.find((p) => p.id === selectedSlot.planogram!.product.id);
+    const targetQty = selectedSlot.planogram.target_quantity;
+    setMerchTargetQty(
+      product?.sale_unit === 'weight' ? targetQty / 1000 : targetQty,
+    );
   }, [
     selectedSlotId,
     selectedSlot?.planogram?.id,
     selectedSlot?.planogram?.target_quantity,
     selectedSlot?.planogram?.product?.id,
+    merchProducts,
   ]);
 
   useEffect(() => {
@@ -1261,21 +1302,28 @@ function StoreMap({
 
     let cancelled = false;
     void (async () => {
-      const cap = await fetchSlotCapacityPreview(slotId, pid);
+      const preview = await fetchSlotCapacityPreview(slotId, pid);
       if (cancelled) {
         return;
       }
-      if (cap === null) {
+      if (preview === null) {
         setMerchSlotCapacity(null);
         return;
       }
-      setMerchSlotCapacity(cap);
+      setMerchSlotCapacity(preview.max_capacity);
+      setMerchQuantityUnit(preview.quantity_unit);
 
       if (hasSavedPlanogram) {
         return;
       }
-      if (cap > 0) {
-        setMerchTargetQty(isMannequin ? 1 : cap);
+      if (preview.quantity_unit === 'kg') {
+        if (preview.max_capacity > 0 && preview.max_capacity_kg) {
+          setMerchTargetQty(Number(preview.max_capacity_kg));
+        }
+        return;
+      }
+      if (preview.max_capacity > 0) {
+        setMerchTargetQty(isMannequin ? 1 : preview.max_capacity);
       }
     })();
 
@@ -1301,31 +1349,41 @@ function StoreMap({
     if (!pid || Number.isNaN(pid)) {
       return;
     }
-    const cap = await fetchSlotCapacityPreview(selectedSlot.id, pid);
-    if (cap === null) {
+    const product = merchProducts.find((p) => p.id === pid);
+    if (product?.sale_unit === 'weight') {
+      setMerchFeedback({
+        type: 'err',
+        text: 'Для весовых товаров задайте целевой вес вручную.',
+      });
+      return;
+    }
+    const preview = await fetchSlotCapacityPreview(selectedSlot.id, pid);
+    if (preview === null) {
       setMerchFeedback({ type: 'err', text: 'Не удалось рассчитать вместимость слота.' });
       return;
     }
-    setMerchSlotCapacity(cap);
+    setMerchSlotCapacity(preview.max_capacity);
+    setMerchQuantityUnit(preview.quantity_unit);
     const isMannequin =
       normalizeEquipmentType(String(merchEquipment?.type ?? 'shelf')) === 'mannequin';
     if (isMannequin) {
       setMerchTargetQty(1);
       return;
     }
-    if (cap < 1) {
+    if (preview.max_capacity < 1) {
       setMerchFeedback({
         type: 'err',
         text: 'Товар не помещается в слот по габаритам — проверьте размеры в номенклатуре.',
       });
       return;
     }
-    setMerchTargetQty(cap);
+    setMerchTargetQty(preview.max_capacity);
     setMerchFeedback(null);
   }, [
     selectedSlot,
     merchProductId,
     merchEquipmentId,
+    merchProducts,
     fetchSlotCapacityPreview,
     merchEquipment?.type,
   ]);
@@ -1344,39 +1402,36 @@ function StoreMap({
       setMerchFeedback({ type: 'err', text: 'Выберите товар.' });
       return;
     }
-    const tq = Math.max(1, Math.floor(merchTargetQty));
+    const product = merchProducts.find((p) => p.id === pid);
+    const isWeight =
+      product?.sale_unit === 'weight' || merchQuantityUnit === 'kg';
+    const tq = isWeight ? Number(merchTargetQty) : Math.max(1, Math.floor(merchTargetQty));
+    if (isWeight && (!tq || tq <= 0)) {
+      setMerchFeedback({ type: 'err', text: 'Укажите целевой вес в кг.' });
+      return;
+    }
     try {
       setMerchSaving(true);
       setMerchFeedback(null);
+      const payload = isWeight
+        ? { slot: selectedSlot.id, product: pid, target_quantity_kg: tq }
+        : { slot: selectedSlot.id, product: pid, target_quantity: tq };
       if (selectedSlot.planogram) {
-        await api.patch(`/planograms/${selectedSlot.planogram.id}/`, {
-          slot: selectedSlot.id,
-          product: pid,
-          target_quantity: tq,
-        });
+        await api.patch(`/planograms/${selectedSlot.planogram.id}/`, payload);
       } else {
-        await api.post('/planograms/', {
-          slot: selectedSlot.id,
-          product: pid,
-          target_quantity: tq,
-        });
+        await api.post('/planograms/', payload);
       }
       setMerchFeedback({ type: 'ok', text: 'Слот планограммы сохранен.' });
       await fetchMerchData(merchEquipmentId);
     } catch (err) {
-      const ax = err as AxiosError<{ detail?: string }>;
-      const d = ax.response?.data?.detail;
       setMerchFeedback({
         type: 'err',
-        text:
-          typeof d === 'string'
-            ? d
-            : 'Не удалось сохранить слот (проверьте уникальность товара в слоте).',
+        text: parseApiError(err, 'Не удалось сохранить слот планограммы.'),
       });
     } finally {
       setMerchSaving(false);
     }
-  }, [fetchMerchData, merchEquipmentId, merchProductId, merchTargetQty, selectedSlot]);
+  }, [fetchMerchData, merchEquipmentId, merchProductId, merchProducts, merchQuantityUnit, merchTargetQty, selectedSlot]);
 
   const handleCreateClearingTask = useCallback(async (): Promise<void> => {
     if (!selectedSlot || !merchEquipmentId) {
@@ -2132,6 +2187,7 @@ function StoreMap({
         merchTargetQty={merchTargetQty}
         onMerchTargetQtyChange={setMerchTargetQty}
         merchSlotCapacity={merchSlotCapacity}
+        merchQuantityUnit={merchQuantityUnit}
         onAutoCalculateTarget={() => void handleAutoCalculateTarget()}
         onSavePlanogram={() => void handleAddPlanogram()}
         onSimulateSale={() => void handleSimulateSale()}

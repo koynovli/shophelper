@@ -29,6 +29,9 @@ type ProductRow = {
   is_stackable: boolean;
   allowed_equipment_types?: string[];
   shelf_life_days?: number | null;
+  sale_unit?: 'piece' | 'weight';
+  packing_coefficient?: number;
+  bulk_density?: number | null;
 };
 
 type ProductFormState = {
@@ -45,11 +48,32 @@ type ProductFormState = {
   is_stackable: boolean;
   allowedEquipmentTypes: FloorEquipmentType[];
   shelfLifeDays: string;
+  saleUnit: 'piece' | 'weight';
+  packingCoefficient: string;
+  bulkDensity: string;
 };
 
 const VALID_EQUIPMENT_TYPES = new Set<FloorEquipmentType>(
   EQUIPMENT_TYPE_OPTIONS.map((o) => o.value),
 );
+
+const WEIGHT_BULK_FILL_FRACTION = 0.55;
+
+function previewBulkDensityKgM3(form: ProductFormState): number | null {
+  const w = Number(form.width);
+  const h = Number(form.height);
+  const d = Number(form.depth);
+  const weightG = Number(form.weight);
+  if (!w || !h || !d || !weightG) {
+    return null;
+  }
+  const volM3 = (w / 1000) * (h / 1000) * (d / 1000);
+  if (volM3 <= 0) {
+    return null;
+  }
+  const particle = weightG / 1000 / volM3;
+  return Math.round(particle * WEIGHT_BULK_FILL_FRACTION * 10) / 10;
+}
 
 const emptyForm: ProductFormState = {
   name: '',
@@ -65,6 +89,9 @@ const emptyForm: ProductFormState = {
   is_stackable: true,
   allowedEquipmentTypes: [],
   shelfLifeDays: '',
+  saleUnit: 'piece',
+  packingCoefficient: '0.6',
+  bulkDensity: '',
 };
 
 function extractList<T>(data: unknown): T[] {
@@ -122,10 +149,18 @@ function productToForm(product: ProductRow): ProductFormState {
       product.shelf_life_days != null && product.shelf_life_days > 0
         ? String(product.shelf_life_days)
         : '',
+    saleUnit: product.sale_unit === 'weight' ? 'weight' : 'piece',
+    packingCoefficient:
+      product.packing_coefficient != null ? String(product.packing_coefficient) : '0.6',
+    bulkDensity:
+      product.bulk_density != null && product.bulk_density > 0
+        ? String(product.bulk_density)
+        : '',
   };
 }
 
 function buildProductPayload(form: ProductFormState): Record<string, unknown> {
+  const isWeight = form.saleUnit === 'weight';
   return {
     name: form.name.trim(),
     sku: form.sku.trim(),
@@ -136,12 +171,14 @@ function buildProductPayload(form: ProductFormState): Record<string, unknown> {
     height: Number(form.height),
     depth: Number(form.depth),
     weight: Number(form.weight),
-    is_marked: form.is_marked,
+    is_marked: isWeight ? false : form.is_marked,
     is_stackable: form.is_stackable,
-    allowed_equipment_types: form.allowedEquipmentTypes,
+    allowed_equipment_types: isWeight ? ['box'] : form.allowedEquipmentTypes,
     shelf_life_days: form.shelfLifeDays.trim()
       ? Math.max(1, Math.floor(Number(form.shelfLifeDays) || 0))
       : null,
+    sale_unit: form.saleUnit,
+    packing_coefficient: Number(form.packingCoefficient) || 0.6,
   };
 }
 
@@ -413,7 +450,7 @@ export function ProductCatalogPage(): React.ReactElement {
               </select>
             </label>
             <label className="text-sm text-slate-300">
-              Цена, ₽
+              {form.saleUnit === 'weight' ? 'Цена, ₽/кг' : 'Цена, ₽'}
               <input
                 required
                 type="number"
@@ -437,15 +474,57 @@ export function ProductCatalogPage(): React.ReactElement {
               />
             </label>
           </div>
+          <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
+            <span className="font-medium text-slate-200">Единица продажи:</span>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="saleUnit"
+                checked={form.saleUnit === 'piece'}
+                onChange={() =>
+                  setForm((prev) => ({
+                    ...prev,
+                    saleUnit: 'piece',
+                  }))
+                }
+              />
+              Штучный
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="saleUnit"
+                checked={form.saleUnit === 'weight'}
+                onChange={() =>
+                  setForm((prev) => ({
+                    ...prev,
+                    saleUnit: 'weight',
+                    is_marked: false,
+                    allowedEquipmentTypes: ['box'],
+                  }))
+                }
+              />
+              На развес (корзина)
+            </label>
+          </div>
           <p className="mt-2 text-xs text-slate-500">
-            Срок в днях от даты производства — при приёмке указывается только дата выпуска. Для
-            одежды и товаров без контроля срока оставьте поле пустым.
+            {form.saleUnit === 'weight'
+              ? 'Весовой товар учитывается в граммах: приёмка и выкладка — в килограммах. Только оборудование «корзина».'
+              : 'Срок в днях от даты производства — при приёмке указывается только дата выпуска. Для одежды и товаров без контроля срока оставьте поле пустым.'}
           </p>
-          <p className="mt-3 text-xs text-slate-500">
-            Габариты в мм — для расчёта max_capacity на слоте (3D-укладка). Для сложенной
-            одежды на полке снимите «Можно штабелировать» и задайте размеры пачки, например
-            300×50×250 (Ш×В×Г).
-          </p>
+          {form.saleUnit === 'piece' ? (
+            <p className="mt-3 text-xs text-slate-500">
+              Габариты в мм — для расчёта max_capacity на слоте (3D-укладка). Для сложенной
+              одежды на полке снимите «Можно штабелировать» и задайте размеры пачки, например
+              300×50×250 (Ш×В×Г).
+            </p>
+          ) : null}
+          {form.saleUnit === 'weight' ? (
+            <p className="mt-3 text-xs text-slate-500">
+              Габариты — средний условный куб одной единицы (мм). Насыпная плотность в корзине
+              ≈ (вес / объём) × 0.55, пересчитывается автоматически при сохранении.
+            </p>
+          ) : null}
           <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
             {(['width', 'height', 'depth', 'weight'] as const).map((key) => (
               <label key={key} className="text-xs text-slate-300">
@@ -455,9 +534,11 @@ export function ProductCatalogPage(): React.ReactElement {
                     ? 'Высота'
                     : key === 'depth'
                       ? 'Глубина'
-                      : 'Вес'}
+                      : form.saleUnit === 'weight'
+                        ? 'Вес единицы (г)'
+                        : 'Вес упак.'}
                 <input
-                  required
+                  required={form.saleUnit === 'piece' || key === 'weight'}
                   type="number"
                   min="0.1"
                   step="0.1"
@@ -468,6 +549,31 @@ export function ProductCatalogPage(): React.ReactElement {
               </label>
             ))}
           </div>
+          {form.saleUnit === 'weight' ? (
+            <p className="mt-3 text-xs text-slate-400">
+              Насыпная плотность (расчёт):{' '}
+              {previewBulkDensityKgM3(form) != null
+                ? `${previewBulkDensityKgM3(form)} кг/м³`
+                : editingProductId != null && form.bulkDensity
+                  ? `${form.bulkDensity} кг/м³`
+                  : '—'}
+            </p>
+          ) : (
+            <label className="mt-3 block text-xs text-slate-300">
+              Коэффициент укладки (0.1–1.0, для навала в корзине)
+              <input
+                type="number"
+                min="0.1"
+                max="1"
+                step="0.05"
+                value={form.packingCoefficient}
+                onChange={(e) => setForm({ ...form, packingCoefficient: e.target.value })}
+                className="mt-1 w-full max-w-xs rounded-md border border-slate-600 bg-slate-950 px-2 py-1.5"
+              />
+            </label>
+          )}
+          {form.saleUnit === 'piece' ? (
+          <>
           <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
             <p className="text-sm font-medium text-slate-200">Тип выкладки</p>
             <p className="mt-1 text-xs text-slate-500">
@@ -544,6 +650,8 @@ export function ProductCatalogPage(): React.ReactElement {
               Маркировка (Честный ЗНАК)
             </label>
           </div>
+          </>
+          ) : null}
           <div className="mt-4 flex flex-wrap gap-2">
             <button
               type="submit"
@@ -608,6 +716,7 @@ export function ProductCatalogPage(): React.ReactElement {
                   <th className="px-2 py-2">Название</th>
                   <th className="px-2 py-2">SKU</th>
                   <th className="px-2 py-2">Категория</th>
+                  <th className="px-2 py-2">Ед.</th>
                   <th className="px-2 py-2">Цена</th>
                   <th className="px-2 py-2">Ш×В×Г, мм</th>
                   <th className="px-2 py-2">Срок, дн.</th>
@@ -626,7 +735,13 @@ export function ProductCatalogPage(): React.ReactElement {
                     <td className="px-2 py-2 font-medium">{p.name}</td>
                     <td className="px-2 py-2">{p.sku}</td>
                     <td className="px-2 py-2">{p.category.name}</td>
-                    <td className="px-2 py-2">{p.price}</td>
+                    <td className="px-2 py-2 text-slate-400">
+                      {p.sale_unit === 'weight' ? 'кг' : 'шт.'}
+                    </td>
+                    <td className="px-2 py-2">
+                      {p.price}
+                      {p.sale_unit === 'weight' ? ' /кг' : ''}
+                    </td>
                     <td className="px-2 py-2 text-slate-400">
                       {p.width}×{p.height}×{p.depth}
                     </td>

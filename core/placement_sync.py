@@ -240,6 +240,9 @@ def reconcile_planogram(planogram: Planogram) -> None:
 
         from .ws_broadcast import broadcast_placement_task_created, broadcast_task_pool
 
+        from .product_units import format_quantity
+
+        qty_label = format_quantity(pg.product, add_qty)
         payload = {
             "id": task_id,
             "product_id": pg.product_id,
@@ -248,7 +251,7 @@ def reconcile_planogram(planogram: Planogram) -> None:
             "slot_id": slot.pk,
             "quantity": add_qty,
             "message": (
-                f"Пополнить: {pg.product.name} — {add_qty} шт. → "
+                f"Пополнить: {pg.product.name} — {qty_label} → "
                 f"{pg.slot.equipment.name}, полка {slot.row_index + 1}"
             ),
         }

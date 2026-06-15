@@ -92,14 +92,23 @@ def execute_supply_order_receive(
             if actual_qty < 0:
                 raise SupplyReceivingError("actual_quantity не может быть отрицательным.")
 
+            if item.product.sale_unit == item.product.SaleUnit.WEIGHT and item.product.is_marked:
+                raise SupplyReceivingError(
+                    f"Товар «{item.product.name}» на развес не может быть маркированным."
+                )
+
             note = (line.get("discrepancy_note") or "").strip()
             if actual_qty != item.quantity:
                 has_discrepancies = True
                 if not note:
+                    from .product_units import format_quantity
+
                     product_label = item.product.name if item.product_id else f"id={item_id}"
+                    ordered = format_quantity(item.product, item.quantity)
+                    received = format_quantity(item.product, actual_qty)
                     raise SupplyReceivingError(
                         f"Укажите примечание по расхождению для «{product_label}» "
-                        f"(заказано {item.quantity}, факт {actual_qty})."
+                        f"(заказано {ordered}, факт {received})."
                     )
 
             item = SupplyOrderItem.objects.select_for_update().get(pk=item_id)
@@ -107,7 +116,12 @@ def execute_supply_order_receive(
             item.discrepancy_note = note
             item.save(update_fields=["actual_quantity", "discrepancy_note"])
 
-            line_cost = Decimal(actual_qty) * item.purchase_price
+            from .product_units import product_stores_weight
+
+            if product_stores_weight(item.product):
+                line_cost = (Decimal(actual_qty) / Decimal(1000)) * item.purchase_price
+            else:
+                line_cost = Decimal(actual_qty) * item.purchase_price
             total_cost += line_cost
 
             if actual_qty == 0:

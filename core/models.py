@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -124,6 +125,10 @@ class Category(models.Model):
 
 
 class Product(models.Model):
+    class SaleUnit(models.TextChoices):
+        PIECE = "piece", "Штучный"
+        WEIGHT = "weight", "На развес"
+
     name = models.CharField(
         max_length=255,
         verbose_name="Название",
@@ -179,6 +184,13 @@ class Product(models.Model):
         verbose_name="Вес",
         help_text="Вес товара (единица измерения по договорённости, например граммы).",
     )
+    sale_unit = models.CharField(
+        max_length=10,
+        choices=SaleUnit.choices,
+        default=SaleUnit.PIECE,
+        verbose_name="Единица продажи",
+        help_text="Штучный товар или на развес (учёт в граммах).",
+    )
     is_marked = models.BooleanField(
         default=False,
         verbose_name="Маркированный товар",
@@ -200,6 +212,18 @@ class Product(models.Model):
         blank=True,
         verbose_name="Срок годности (дней)",
         help_text="От даты производства. Пусто — контроль срока не ведётся.",
+    )
+    packing_coefficient = models.FloatField(
+        default=0.60,
+        validators=[MinValueValidator(0.1), MaxValueValidator(1.0)],
+        verbose_name="Коэффициент укладки",
+        help_text="Доля объёма слота, занимаемая товаром при навале (BOX, штучный).",
+    )
+    bulk_density = models.FloatField(
+        null=True,
+        blank=True,
+        verbose_name="Насыпная плотность (кг/м³)",
+        help_text="Для товаров на развес в корзине (BOX).",
     )
 
     class Meta:
@@ -340,6 +364,12 @@ class SupplyOrder(models.Model):
         RECEIVED = "received", "Принят"
         CANCELLED = "cancelled", "Отменен"
 
+    class CancellationReason(models.TextChoices):
+        MANAGER_CHANGED_MIND = "manager_changed_mind", "Управляющий передумал"
+        SUPPLIER_UNABLE = "supplier_unable", "Поставщик не смог поставить"
+        ORDER_ERROR = "order_error", "Ошибка в заказе"
+        OTHER = "other", "Другое"
+
     company = models.ForeignKey(
         Company,
         on_delete=models.CASCADE,
@@ -423,6 +453,35 @@ class SupplyOrder(models.Model):
         blank=True,
         verbose_name="Плановая дата приёмки",
         help_text="Ожидаемая дата поступления товара на склад (план менеджера).",
+    )
+    cancellation_reason_code = models.CharField(
+        max_length=40,
+        choices=CancellationReason.choices,
+        blank=True,
+        default="",
+        verbose_name="Причина отмены",
+        help_text="Код причины отмены заказа.",
+    )
+    cancellation_reason_note = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Комментарий к отмене",
+        help_text="Дополнительный комментарий при отмене заказа.",
+    )
+    cancelled_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Отменён",
+        help_text="Дата и время отмены заказа.",
+    )
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cancelled_supply_orders",
+        verbose_name="Кем отменён",
+        help_text="Пользователь, отменивший заказ.",
     )
 
     class Meta:
@@ -1022,6 +1081,12 @@ class PlacementTaskScan(models.Model):
         auto_now_add=True,
         verbose_name="Время скана",
     )
+    weight_grams = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Вес скана (г)",
+        help_text="Для товаров на развес — вес отсканированной порции в граммах.",
+    )
 
     class Meta:
         verbose_name = "Скан выкладки"
@@ -1036,6 +1101,8 @@ class PlacementTaskScan(models.Model):
         ]
 
     def __str__(self) -> str:
+        if self.weight_grams:
+            return f"Scan {self.weight_grams}g → task #{self.task_id}"
         label = self.serial_number or "unit"
         return f"Scan {label} → task #{self.task_id}"
 

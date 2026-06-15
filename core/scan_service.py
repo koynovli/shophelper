@@ -5,7 +5,7 @@ from typing import Any
 
 from django.utils import timezone
 
-from shophelper.utils import parse_data_matrix
+from shophelper.utils import parse_data_matrix, parse_variable_weight_ean13
 
 from .models import Product, ProductBatch
 
@@ -18,6 +18,8 @@ class ScanResolveResult:
     batch: ProductBatch | None
     message: str
     parsed: dict[str, Any]
+    weight_grams: int | None = None
+    sale_unit: str | None = None
 
     def to_dict(self, *, product_serializer=None, batch_serializer=None) -> dict:
         product_data = None
@@ -31,6 +33,7 @@ class ScanResolveResult:
                 "sku": self.product.sku,
                 "gtin": self.product.gtin,
                 "is_marked": self.product.is_marked,
+                "sale_unit": self.product.sale_unit,
             }
         if self.batch is not None and batch_serializer is not None:
             batch_data = batch_serializer(self.batch).data
@@ -41,7 +44,7 @@ class ScanResolveResult:
                 "current_quantity": self.batch.current_quantity,
                 "serial_number": self.batch.serial_number,
             }
-        return {
+        payload = {
             "status": self.status,
             "scan_kind": self.scan_kind,
             "message": self.message,
@@ -49,6 +52,11 @@ class ScanResolveResult:
             "batch": batch_data,
             "parsed": self.parsed,
         }
+        if self.weight_grams is not None:
+            payload["weight_grams"] = self.weight_grams
+        if self.sale_unit is not None:
+            payload["sale_unit"] = self.sale_unit
+        return payload
 
 
 def _normalize_gtin(raw: str) -> str | None:
@@ -83,6 +91,16 @@ def _find_product_by_plain_code(code: str) -> Product | None:
     return Product.objects.filter(sku__iexact=sku).first()
 
 
+def _find_product_by_plu(plu: str) -> Product | None:
+    plu = (plu or "").strip()
+    if not plu:
+        return None
+    product = Product.objects.filter(sku__iexact=plu).first()
+    if product is not None:
+        return product
+    return Product.objects.filter(sku__iendswith=plu).first()
+
+
 def _active_batch_qs(*, product_id: int, store_id: int | None):
     today = timezone.localdate()
     qs = ProductBatch.objects.filter(
@@ -113,6 +131,50 @@ def _find_marked_batch(
     return qs.first()
 
 
+def _resolve_variable_weight_code(
+    raw_code: str,
+    store_id: int | None,
+) -> ScanResolveResult | None:
+    parsed_vw = parse_variable_weight_ean13(raw_code)
+    if parsed_vw is None:
+        return None
+    product = _find_product_by_plu(str(parsed_vw["plu"]))
+    if product is None:
+        return ScanResolveResult(
+            status="not_found",
+            scan_kind="variable_weight_ean13",
+            product=None,
+            batch=None,
+            message="Товар с таким PLU не найден в каталоге.",
+            parsed={"variable_weight": parsed_vw},
+        )
+    if product.sale_unit != Product.SaleUnit.WEIGHT:
+        return ScanResolveResult(
+            status="product_only",
+            scan_kind="variable_weight_ean13",
+            product=product,
+            batch=None,
+            message="Штрихкод содержит вес, но товар в каталоге не «на развес».",
+            parsed={"variable_weight": parsed_vw},
+            weight_grams=int(parsed_vw["weight_grams"]),
+            sale_unit=product.sale_unit,
+        )
+    batch = _active_batch_qs(product_id=product.pk, store_id=store_id).first()
+    weight_grams = int(parsed_vw["weight_grams"])
+    return ScanResolveResult(
+        status="found" if batch else "product_only",
+        scan_kind="variable_weight_ean13",
+        product=product,
+        batch=batch,
+        message="Весовой товар найден по штрихкоду."
+        if batch
+        else "Товар найден, но нет доступных партий на складе.",
+        parsed={"variable_weight": parsed_vw},
+        weight_grams=weight_grams,
+        sale_unit=product.sale_unit,
+    )
+
+
 def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResult:
     """Разбор кода маркировки / EAN / SKU и поиск товара (и партии для marked)."""
     parsed = parse_data_matrix(raw_code)
@@ -139,6 +201,7 @@ def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResul
                     batch=None,
                     message="Отсканирован GTIN маркированного товара; нужен код единицы (Data Matrix).",
                     parsed=parsed,
+                    sale_unit=product.sale_unit,
                 )
             batch = _find_marked_batch(
                 product_id=product.pk, serial=serial, store_id=store_id
@@ -151,6 +214,7 @@ def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResul
                     batch=None,
                     message="Единица с таким серийным номером не найдена на складе.",
                     parsed=parsed,
+                    sale_unit=product.sale_unit,
                 )
             return ScanResolveResult(
                 status="found",
@@ -159,6 +223,7 @@ def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResul
                 batch=batch,
                 message="Маркированная единица найдена.",
                 parsed=parsed,
+                sale_unit=product.sale_unit,
             )
         batch = _active_batch_qs(product_id=product.pk, store_id=store_id).first()
         return ScanResolveResult(
@@ -170,9 +235,14 @@ def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResul
             if batch
             else "Товар найден, но нет доступных партий на складе.",
             parsed=parsed,
+            sale_unit=product.sale_unit,
         )
 
     plain = (raw_code or "").strip()
+    variable = _resolve_variable_weight_code(plain, store_id)
+    if variable is not None:
+        return variable
+
     product = _find_product_by_plain_code(plain)
     if product is None:
         return ScanResolveResult(
@@ -192,6 +262,7 @@ def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResul
             batch=None,
             message="Для маркированного товара нужен код Data Matrix (с серийным номером).",
             parsed=parsed,
+            sale_unit=product.sale_unit,
         )
 
     batch = _active_batch_qs(product_id=product.pk, store_id=store_id).first()
@@ -204,6 +275,7 @@ def resolve_scan(raw_code: str, store_id: int | None = None) -> ScanResolveResul
         if batch
         else "Товар найден, но нет доступных партий на складе.",
         parsed=parsed,
+        sale_unit=product.sale_unit,
     )
 
 

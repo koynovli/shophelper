@@ -3,20 +3,19 @@ from __future__ import annotations
 from django.db.models import Q
 
 from .models import PlacementTask, ShelfClearingTask, StaffTask, SupplyReceivingTask, User, WriteOffTask
+from .placement_scan_service import format_task_destination, scanned_amount_for_task
+from .product_units import format_quantity
 
 
 def _placement_title(task: PlacementTask) -> str:
-    return f"Выложить: {task.product.name} — {task.quantity} шт."
+    return (
+        f"Выложить: {task.product.name} — "
+        f"{format_quantity(task.product, task.quantity)}"
+    )
 
 
 def _placement_destination(task: PlacementTask) -> str:
-    if task.planogram_id and task.planogram.slot_id:
-        slot = task.planogram.slot
-        return (
-            f"{task.equipment.name} → Полка {slot.row_index + 1} → "
-            f"Ячейка {slot.col_index + 1}"
-        )
-    return task.equipment.name
+    return format_task_destination(task)
 
 
 def _placement_slot_info(task: PlacementTask) -> dict | None:
@@ -40,7 +39,7 @@ def _placement_to_dto(task: PlacementTask) -> dict:
     batch_expiration = None
     if task.batch_id and task.batch:
         batch_expiration = task.batch.expiration_date.isoformat()
-    scans_done = task.scans.count() if hasattr(task, "scans") else 0
+    scans_done = scanned_amount_for_task(task) if hasattr(task, "scans") else 0
     return {
         "task_type": "placement",
         "id": str(task.pk),
@@ -54,15 +53,19 @@ def _placement_to_dto(task: PlacementTask) -> dict:
             "sku": task.product.sku,
             "gtin": task.product.gtin,
             "is_marked": task.product.is_marked,
+            "sale_unit": task.product.sale_unit,
         },
         "equipment": {"id": task.equipment_id, "name": task.equipment.name},
         "quantity": task.quantity,
+        "quantity_display": format_quantity(task.product, task.quantity),
         "slot_info": _placement_slot_info(task),
         "photo_url": task.photo_url,
         "has_chat": True,
         "batch_expiration": batch_expiration,
         "scans_done": scans_done,
         "scans_required": task.quantity,
+        "scans_done_display": format_quantity(task.product, scans_done),
+        "scans_required_display": format_quantity(task.product, task.quantity),
         "created_at": task.created_at.isoformat(),
     }
 

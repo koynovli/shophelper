@@ -46,7 +46,7 @@ export interface EquipmentSlot {
   nearest_batch_expiry?: string | null;
   planogram?: {
     id: number;
-    product: { id: number; name: string; sku: string };
+    product: { id: number; name: string; sku: string; sale_unit?: 'piece' | 'weight' };
     target_quantity: number;
     current_qty?: number;
     max_capacity?: number;
@@ -99,19 +99,35 @@ function parseFiniteNumber(value: unknown, fallback = 0): number {
   return fallback;
 }
 
-export function slotFillMetrics(slot: EquipmentSlot): {
+export function formatSlotQuantity(amount: number, saleUnit?: 'piece' | 'weight'): string {
+  const qty = Math.max(0, Number(amount) || 0);
+  if (saleUnit === 'weight') {
+    return `${(qty / 1000).toFixed(3).replace(/\.?0+$/, '')} кг`;
+  }
+  return `${qty} шт.`;
+}
+
+export function slotFillMetrics(
+  slot: EquipmentSlot,
+  saleUnit?: 'piece' | 'weight',
+): {
   current: number;
   cap: number;
+  currentLabel: string;
+  capLabel: string;
   percent: number | null;
   below30: boolean;
   above70: boolean;
 } {
+  const unit = saleUnit ?? slot.planogram?.product?.sale_unit ?? 'piece';
   const cap = Math.max(0, Number(slot.max_capacity ?? slot.planogram?.max_capacity ?? 0));
   const current = Math.max(0, Number(slot.current_qty ?? slot.planogram?.current_qty ?? 0));
   const percent = cap > 0 ? Math.min(100, Math.round((current / cap) * 100)) : null;
   return {
     current,
     cap,
+    currentLabel: formatSlotQuantity(current, unit),
+    capLabel: cap > 0 ? formatSlotQuantity(cap, unit) : '—',
     percent,
     below30: !!slot.planogram && cap > 0 && current / cap < 0.3,
     above70: !!slot.planogram && cap > 0 && current / cap > 0.7,

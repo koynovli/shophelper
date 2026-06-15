@@ -255,6 +255,9 @@ class ProductTrackingRowSerializer(serializers.ModelSerializer):
     total_quantity = serializers.IntegerField(read_only=True)
     warehouse_qty = serializers.IntegerField(read_only=True)
     hall_qty = serializers.IntegerField(read_only=True)
+    total_quantity_display = serializers.SerializerMethodField()
+    warehouse_qty_display = serializers.SerializerMethodField()
+    hall_qty_display = serializers.SerializerMethodField()
     pending_qty = serializers.IntegerField(read_only=True)
     planogram_target_sum = serializers.IntegerField(read_only=True)
     status = serializers.SerializerMethodField()
@@ -265,10 +268,14 @@ class ProductTrackingRowSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "sale_unit",
             "category",
             "total_quantity",
+            "total_quantity_display",
             "warehouse_qty",
+            "warehouse_qty_display",
             "hall_qty",
+            "hall_qty_display",
             "pending_qty",
             "planogram_target_sum",
             "status",
@@ -279,6 +286,21 @@ class ProductTrackingRowSerializer(serializers.ModelSerializer):
         if obj.category_id is None:
             return None
         return {"id": obj.category_id, "name": obj.category.name}
+
+    def get_total_quantity_display(self, obj: Product) -> str:
+        from .product_units import format_quantity
+
+        return format_quantity(obj, int(getattr(obj, "total_quantity", 0) or 0))
+
+    def get_warehouse_qty_display(self, obj: Product) -> str:
+        from .product_units import format_quantity
+
+        return format_quantity(obj, int(getattr(obj, "warehouse_qty", 0) or 0))
+
+    def get_hall_qty_display(self, obj: Product) -> str:
+        from .product_units import format_quantity
+
+        return format_quantity(obj, int(getattr(obj, "hall_qty", 0) or 0))
 
     def get_status(self, obj: Product) -> str:
         return compute_tracking_status(obj)
@@ -307,6 +329,7 @@ class ProductTrackingDetailSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "sku",
+            "sale_unit",
             "category",
             "total_quantity",
             "warehouse_qty",

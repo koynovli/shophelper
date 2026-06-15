@@ -6,7 +6,7 @@ from .equipment_profiles import (
     needs_shelves,
     shelf_dimensions_for_equipment,
 )
-from .models import Equipment, EquipmentSlot, Inventory, Planogram, ProductBatch, Shelf, StockItem
+from .models import Equipment, EquipmentSlot, Inventory, Planogram, Product, ProductBatch, Shelf, StockItem
 from .placement_sync import reconcile_for_product, reconcile_planogram, sync_stock_item_from_batches
 from .slot_inventory_sync import (
     is_operational_side_effects_suppressed,
@@ -16,9 +16,15 @@ from .slot_inventory_sync import (
 
 
 def _sync_planogram_slot_capacity(planogram: Planogram) -> None:
+    from .product_units import product_stores_weight
     from .spatial_engine import refresh_slot_max_capacity
 
     cap = refresh_slot_max_capacity(planogram.slot, planogram.product)
+    if product_stores_weight(planogram.product):
+        if cap > 0 and int(planogram.target_quantity or 0) > cap:
+            Planogram.objects.filter(pk=planogram.pk).update(target_quantity=cap)
+            planogram.target_quantity = cap
+        return
     if int(planogram.target_quantity or 0) < 1 and cap > 0:
         Planogram.objects.filter(pk=planogram.pk).update(target_quantity=cap)
         planogram.target_quantity = cap
@@ -47,6 +53,14 @@ def planogram_deleted(sender, instance: Planogram, **kwargs):
     if slot is not None:
         refresh_slot_max_capacity(slot)
         EquipmentSlot.objects.filter(pk=slot.pk).update(current_qty=0)
+
+
+@receiver(post_save, sender=Product)
+def product_saved_refresh_slot_capacity(sender, instance: Product, **kwargs):
+    from .spatial_engine import refresh_slot_max_capacity
+
+    for planogram in Planogram.objects.filter(product=instance).select_related("slot"):
+        refresh_slot_max_capacity(planogram.slot, instance)
 
 
 @receiver(post_save, sender=StockItem)

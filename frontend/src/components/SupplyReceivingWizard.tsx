@@ -10,7 +10,9 @@ type ReceivingLine = {
   product_name: string;
   sku: string;
   shelf_life_days: number | null;
+  sale_unit?: 'piece' | 'weight';
   quantity: number;
+  quantity_kg?: string | null;
   actualQty: string;
   manufactureDate: string;
   note: string;
@@ -29,7 +31,9 @@ type ReceivingTaskDetail = {
         name: string;
         sku: string;
         shelf_life_days?: number | null;
+        sale_unit?: 'piece' | 'weight';
       };
+      quantity_kg?: string | null;
     }[];
   };
 };
@@ -117,8 +121,13 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
             product_name: item.product_detail?.name ?? `Товар #${item.id}`,
             sku: item.product_detail?.sku ?? '—',
             shelf_life_days: item.product_detail?.shelf_life_days ?? null,
+            sale_unit: item.product_detail?.sale_unit ?? 'piece',
             quantity: item.quantity,
-            actualQty: String(item.quantity),
+            quantity_kg: item.quantity_kg ?? null,
+            actualQty:
+              item.product_detail?.sale_unit === 'weight' && item.quantity_kg
+                ? item.quantity_kg
+                : String(item.quantity),
             manufactureDate: '',
             note: '',
           })),
@@ -134,6 +143,13 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
 
   const discrepancyLines = useMemo(() => {
     return lines.filter((line) => {
+      if (line.sale_unit === 'weight') {
+        const actualKg = Number(line.actualQty) || 0;
+        const orderedKg = line.quantity_kg
+          ? Number(line.quantity_kg)
+          : line.quantity / 1000;
+        return Math.abs(actualKg - orderedKg) > 0.0005;
+      }
       const actual = Math.floor(Number(line.actualQty) || 0);
       return actual !== line.quantity;
     });
@@ -177,14 +193,26 @@ export function SupplyReceivingWizard({ task, onDone }: Props): React.ReactEleme
     setError(null);
     try {
       await api.post(`/receiving-tasks/${task.id}/complete/`, {
-        lines: lines.map((line) => ({
-          item_id: line.item_id,
-          manufacture_date: tracksExpiry(line.shelf_life_days)
-            ? line.manufactureDate
-            : null,
-          actual_quantity: Math.max(0, Math.floor(Number(line.actualQty) || 0)),
-          discrepancy_note: line.note.trim(),
-        })),
+        lines: lines.map((line) => {
+          if (line.sale_unit === 'weight') {
+            return {
+              item_id: line.item_id,
+              manufacture_date: tracksExpiry(line.shelf_life_days)
+                ? line.manufactureDate
+                : null,
+              actual_quantity_kg: Math.max(0, Number(line.actualQty) || 0),
+              discrepancy_note: line.note.trim(),
+            };
+          }
+          return {
+            item_id: line.item_id,
+            manufacture_date: tracksExpiry(line.shelf_life_days)
+              ? line.manufactureDate
+              : null,
+            actual_quantity: Math.max(0, Math.floor(Number(line.actualQty) || 0)),
+            discrepancy_note: line.note.trim(),
+          };
+        }),
       });
       onDone();
     } catch (err) {

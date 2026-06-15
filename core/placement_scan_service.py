@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.utils import timezone
 
 from .models import PlacementTask, PlacementTaskScan, Product, User
+from .product_units import format_kg, format_quantity, kg_to_grams, product_stores_weight
 from .scan_service import ScanResolveResult, resolve_scan
 
 if TYPE_CHECKING:
@@ -22,6 +24,13 @@ ACTIVE_PLACEMENT_STATUSES = (
     PlacementTask.Status.PENDING,
     PlacementTask.Status.IN_PROGRESS,
 )
+
+
+def scanned_amount_for_task(task: PlacementTask) -> int:
+    if product_stores_weight(task.product):
+        total = task.scans.aggregate(total=Sum("weight_grams"))["total"]
+        return int(total or 0)
+    return task.scans.count()
 
 
 def _placement_qs_for_user(user: AbstractUser, store_id: int | None):
@@ -43,9 +52,13 @@ def _placement_qs_for_user(user: AbstractUser, store_id: int | None):
     return qs.order_by("product__name", "created_at", "pk").prefetch_related("scans")
 
 
-def _task_destination(task: PlacementTask) -> str:
+def format_task_destination(task: PlacementTask) -> str:
+    from .models import Equipment
+
     if task.planogram_id and task.planogram.slot_id:
         slot = task.planogram.slot
+        if task.equipment.type == Equipment.EquipmentType.BOX:
+            return f"{task.equipment.name} → Бокс / корзина"
         return (
             f"{task.equipment.name} → Полка {slot.row_index + 1} → "
             f"Ячейка {slot.col_index + 1}"
@@ -53,13 +66,21 @@ def _task_destination(task: PlacementTask) -> str:
     return task.equipment.name
 
 
+def _task_destination(task: PlacementTask) -> str:
+    return format_task_destination(task)
+
+
 def _task_to_brief(task: PlacementTask) -> dict:
     batch_expiration = None
     if task.batch_id and task.batch:
         batch_expiration = task.batch.expiration_date.isoformat()
+    required = int(task.quantity)
+    done = scanned_amount_for_task(task)
     return {
         "id": task.pk,
-        "quantity": task.quantity,
+        "quantity": required,
+        "quantity_display": format_quantity(task.product, required),
+        "sale_unit": task.product.sale_unit,
         "status": task.status,
         "destination": _task_destination(task),
         "equipment": {"id": task.equipment_id, "name": task.equipment.name},
@@ -73,8 +94,10 @@ def _task_to_brief(task: PlacementTask) -> dict:
             else None
         ),
         "batch_expiration": batch_expiration,
-        "scans_done": task.scans.count(),
-        "scans_required": task.quantity,
+        "scans_done": done,
+        "scans_required": required,
+        "scans_done_display": format_quantity(task.product, done),
+        "scans_required_display": format_quantity(task.product, required),
     }
 
 
@@ -92,13 +115,20 @@ def get_picking_list(user: AbstractUser, store_id: int | None) -> list[dict]:
                     "sku": task.product.sku,
                     "gtin": task.product.gtin,
                     "is_marked": task.product.is_marked,
+                    "sale_unit": task.product.sale_unit,
                 },
                 "total_qty": 0,
+                "total_qty_display": "",
                 "tasks": [],
             }
         groups[pid]["total_qty"] += int(task.quantity)
         groups[pid]["tasks"].append(_task_to_brief(task))
-    return sorted(groups.values(), key=lambda g: g["product"]["name"])
+    result = []
+    for group in groups.values():
+        product = Product.objects.filter(pk=group["product"]["id"]).first()
+        group["total_qty_display"] = format_quantity(product, group["total_qty"])
+        result.append(group)
+    return sorted(result, key=lambda g: g["product"]["name"])
 
 
 def scan_check_for_picking(
@@ -132,6 +162,7 @@ def scan_check_for_picking(
                 "name": resolved.product.name,
                 "sku": resolved.product.sku,
                 "is_marked": resolved.product.is_marked,
+                "sale_unit": resolved.product.sale_unit,
             },
             "suggested_tasks": [],
             "resolve": resolved.to_dict(),
@@ -139,14 +170,16 @@ def scan_check_for_picking(
 
     suggested = [_task_to_brief(t) for t in tasks]
     total = sum(int(t.quantity) for t in tasks)
+    qty_label = format_quantity(resolved.product, total)
     return {
         "matches_picking": True,
-        "message": f"Да, нужен для выкладки: {resolved.product.name} — {total} шт.",
+        "message": f"Да, нужен для выкладки: {resolved.product.name} — {qty_label}.",
         "product": {
             "id": resolved.product.pk,
             "name": resolved.product.name,
             "sku": resolved.product.sku,
             "is_marked": resolved.product.is_marked,
+            "sale_unit": resolved.product.sale_unit,
         },
         "suggested_tasks": suggested,
         "resolve": resolved.to_dict(),
@@ -189,15 +222,16 @@ def find_best_task_for_scan(
 
 
 def scan_count_for_task(task: PlacementTask) -> int:
-    return task.scans.count()
+    return scanned_amount_for_task(task)
 
 
 def record_placement_scan(
     task_id: int,
     user: AbstractUser,
     *,
-    raw_code: str,
+    raw_code: str | None = None,
     store_id: int | None,
+    weight_kg: Decimal | str | float | None = None,
 ) -> tuple[PlacementTask, ScanResolveResult]:
     with transaction.atomic():
         task = (
@@ -210,42 +244,104 @@ def record_placement_scan(
         if task.assigned_to_id and task.assigned_to_id != user.pk:
             raise PlacementScanError("Задача назначена другому сотруднику.")
 
-        resolved = resolve_scan(raw_code, store_id)
-        if resolved.product is None or resolved.product.pk != task.product_id:
-            raise PlacementScanError(
-                resolved.message
-                if resolved.product is None
-                else "Отсканирован другой товар — нужен "
-                f"«{task.product.name}»."
-            )
-
-        current = scan_count_for_task(task)
-        if current >= int(task.quantity):
-            raise PlacementScanError("Уже отсканировано достаточно единиц для этой задачи.")
-
-        if task.product.is_marked:
-            if resolved.batch is None or not resolved.parsed.get("serial"):
+        if product_stores_weight(task.product):
+            weight_grams: int | None = None
+            resolved: ScanResolveResult | None = None
+            code = (raw_code or "").strip()
+            if code:
+                resolved = resolve_scan(code, store_id)
+                if resolved.product is None or resolved.product.pk != task.product_id:
+                    raise PlacementScanError(
+                        resolved.message
+                        if resolved.product is None
+                        else "Отсканирован другой товар — нужен "
+                        f"«{task.product.name}»."
+                    )
+                if resolved.weight_grams:
+                    weight_grams = int(resolved.weight_grams)
+            if weight_grams is None and weight_kg is not None:
+                weight_grams = kg_to_grams(weight_kg)
+            if weight_grams is None or weight_grams <= 0:
                 raise PlacementScanError(
-                    "Для маркированного товара отсканируйте Data Matrix с серийным номером."
+                    "Укажите вес в килограммах или отсканируйте весовой штрихкод."
                 )
-            serial = resolved.parsed["serial"]
-            if PlacementTaskScan.objects.filter(task=task, serial_number=serial).exists():
-                raise PlacementScanError("Эта единица уже отсканирована для задачи.")
+
+            current = scanned_amount_for_task(task)
+            required = int(task.quantity)
+            if current + weight_grams > required:
+                remaining = max(0, required - current)
+                raise PlacementScanError(
+                    f"Превышен план выкладки. Осталось: {format_kg(remaining)}."
+                )
+
+            batch = resolved.batch if resolved is not None else None
+            if batch is None:
+                from .scan_service import _active_batch_qs
+
+                batch = _active_batch_qs(
+                    product_id=task.product_id,
+                    store_id=store_id or task.equipment.zone.store_id,
+                ).first()
+
             PlacementTaskScan.objects.create(
                 task=task,
                 product=task.product,
-                batch=resolved.batch,
-                serial_number=serial,
-                scanned_by=user,
-            )
-        else:
-            PlacementTaskScan.objects.create(
-                task=task,
-                product=task.product,
-                batch=resolved.batch,
+                batch=batch,
                 serial_number=None,
                 scanned_by=user,
+                weight_grams=weight_grams,
             )
+            if resolved is None:
+                resolved = ScanResolveResult(
+                    status="found",
+                    scan_kind="manual_weight",
+                    product=task.product,
+                    batch=batch,
+                    message=f"Зафиксировано {format_kg(weight_grams)}.",
+                    parsed={},
+                    weight_grams=weight_grams,
+                    sale_unit=task.product.sale_unit,
+                )
+        else:
+            code = (raw_code or "").strip()
+            if not code:
+                raise PlacementScanError("Отсканируйте код товара.")
+            resolved = resolve_scan(code, store_id)
+            if resolved.product is None or resolved.product.pk != task.product_id:
+                raise PlacementScanError(
+                    resolved.message
+                    if resolved.product is None
+                    else "Отсканирован другой товар — нужен "
+                    f"«{task.product.name}»."
+                )
+
+            current = scan_count_for_task(task)
+            if current >= int(task.quantity):
+                raise PlacementScanError("Уже отсканировано достаточно единиц для этой задачи.")
+
+            if task.product.is_marked:
+                if resolved.batch is None or not resolved.parsed.get("serial"):
+                    raise PlacementScanError(
+                        "Для маркированного товара отсканируйте Data Matrix с серийным номером."
+                    )
+                serial = resolved.parsed["serial"]
+                if PlacementTaskScan.objects.filter(task=task, serial_number=serial).exists():
+                    raise PlacementScanError("Эта единица уже отсканирована для задачи.")
+                PlacementTaskScan.objects.create(
+                    task=task,
+                    product=task.product,
+                    batch=resolved.batch,
+                    serial_number=serial,
+                    scanned_by=user,
+                )
+            else:
+                PlacementTaskScan.objects.create(
+                    task=task,
+                    product=task.product,
+                    batch=resolved.batch,
+                    serial_number=None,
+                    scanned_by=user,
+                )
 
     task = PlacementTask.objects.select_related(
         "product", "equipment", "planogram", "planogram__slot", "batch"
@@ -254,8 +350,16 @@ def record_placement_scan(
 
 
 def ensure_placement_scans_complete(task: PlacementTask) -> None:
-    count = scan_count_for_task(task)
     required = int(task.quantity)
+    if product_stores_weight(task.product):
+        done = scanned_amount_for_task(task)
+        if done < required:
+            raise PlacementScanError(
+                f"Отсканируйте товар: {format_kg(done)} из {format_kg(required)}."
+            )
+        return
+
+    count = scan_count_for_task(task)
     if count < required:
         raise PlacementScanError(
             f"Отсканируйте товар: {count} из {required} единиц."

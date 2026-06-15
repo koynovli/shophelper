@@ -43,7 +43,15 @@ class ProductSerializer(serializers.ModelSerializer):
 class ProductBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
-        fields = ("id", "name", "sku", "shelf_life_days", "gtin", "is_marked")
+        fields = (
+            "id",
+            "name",
+            "sku",
+            "shelf_life_days",
+            "gtin",
+            "is_marked",
+            "sale_unit",
+        )
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -72,10 +80,15 @@ class ProductListSerializer(serializers.ModelSerializer):
             "is_stackable",
             "allowed_equipment_types",
             "shelf_life_days",
+            "sale_unit",
+            "packing_coefficient",
+            "bulk_density",
         )
 
 
 class ProductCreateSerializer(serializers.ModelSerializer):
+    bulk_density = serializers.FloatField(read_only=True)
+
     class Meta:
         model = Product
         fields = (
@@ -92,6 +105,9 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             "is_stackable",
             "allowed_equipment_types",
             "shelf_life_days",
+            "sale_unit",
+            "packing_coefficient",
+            "bulk_density",
         )
         extra_kwargs = {
             "gtin": {"required": False, "allow_null": True, "allow_blank": True},
@@ -99,7 +115,14 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             "is_stackable": {"required": False},
             "allowed_equipment_types": {"required": False},
             "shelf_life_days": {"required": False, "allow_null": True},
+            "sale_unit": {"required": False},
         }
+
+    def _sale_unit(self) -> str:
+        if self.instance is not None and "sale_unit" not in (self.initial_data or {}):
+            return self.instance.sale_unit
+        raw = (self.initial_data or {}).get("sale_unit", Product.SaleUnit.PIECE)
+        return str(raw or Product.SaleUnit.PIECE)
 
     def validate_allowed_equipment_types(self, value):
         if value in (None, ""):
@@ -153,12 +176,18 @@ class ProductCreateSerializer(serializers.ModelSerializer):
         return float(value)
 
     def validate_width(self, value: float) -> float:
+        if self._sale_unit() == Product.SaleUnit.WEIGHT:
+            return float(value) if value and float(value) > 0 else 1.0
         return self._validate_positive(value, "Ширина")
 
     def validate_height(self, value: float) -> float:
+        if self._sale_unit() == Product.SaleUnit.WEIGHT:
+            return float(value) if value and float(value) > 0 else 1.0
         return self._validate_positive(value, "Высота")
 
     def validate_depth(self, value: float) -> float:
+        if self._sale_unit() == Product.SaleUnit.WEIGHT:
+            return float(value) if value and float(value) > 0 else 1.0
         return self._validate_positive(value, "Глубина")
 
     def validate_weight(self, value: float) -> float:
@@ -172,10 +201,70 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Срок годности должен быть не меньше 1 дня.")
         return days
 
+    def validate(self, attrs):
+        from .product_units import compute_bulk_density_kg_m3
+
+        sale_unit = attrs.get("sale_unit", self._sale_unit())
+        is_marked = attrs.get(
+            "is_marked",
+            self.instance.is_marked if self.instance is not None else False,
+        )
+        if sale_unit == Product.SaleUnit.WEIGHT:
+            if is_marked:
+                raise serializers.ValidationError(
+                    {"is_marked": "Товар на развес не может быть маркированным."}
+                )
+            attrs["is_marked"] = False
+            allowed = attrs.get(
+                "allowed_equipment_types",
+                list(self.instance.allowed_equipment_types or []) if self.instance else [],
+            )
+            if allowed and Equipment.EquipmentType.BOX not in {
+                str(a).strip() for a in allowed
+            }:
+                raise serializers.ValidationError(
+                    {
+                        "allowed_equipment_types": (
+                            "Для товара на развес укажите тип оборудования «box» (корзина)."
+                        )
+                    }
+                )
+            width = attrs.get("width", self.instance.width if self.instance else None)
+            height = attrs.get("height", self.instance.height if self.instance else None)
+            depth = attrs.get("depth", self.instance.depth if self.instance else None)
+            weight = attrs.get("weight", self.instance.weight if self.instance else None)
+            bulk_density = compute_bulk_density_kg_m3(width, height, depth, weight)
+            if bulk_density is None:
+                raise serializers.ValidationError(
+                    {
+                        "weight": (
+                            "Заполните габариты и средний вес одной единицы "
+                            "для расчёта насыпной плотности."
+                        )
+                    }
+                )
+            attrs["bulk_density"] = bulk_density
+        elif "bulk_density" in attrs:
+            attrs["bulk_density"] = None
+        packing = attrs.get("packing_coefficient")
+        if packing is not None and (float(packing) < 0.1 or float(packing) > 1.0):
+            raise serializers.ValidationError(
+                {"packing_coefficient": "Коэффициент укладки должен быть от 0.1 до 1.0."}
+            )
+        return attrs
+
     def update(self, instance, validated_data):
         from .spatial_engine import refresh_slot_max_capacity
 
         instance = super().update(instance, validated_data)
+        for planogram in Planogram.objects.filter(product=instance).select_related("slot"):
+            refresh_slot_max_capacity(planogram.slot, instance)
+        return instance
+
+    def create(self, validated_data):
+        from .spatial_engine import refresh_slot_max_capacity
+
+        instance = super().create(validated_data)
         for planogram in Planogram.objects.filter(product=instance).select_related("slot"):
             refresh_slot_max_capacity(planogram.slot, instance)
         return instance
@@ -292,6 +381,8 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
     destination_text = serializers.SerializerMethodField()
     scans_done = serializers.SerializerMethodField()
     scans_required = serializers.IntegerField(source="quantity", read_only=True)
+    scans_done_display = serializers.SerializerMethodField()
+    scans_required_display = serializers.SerializerMethodField()
     batch_expiration = serializers.SerializerMethodField()
 
     class Meta:
@@ -311,6 +402,8 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
             "photo_url",
             "scans_done",
             "scans_required",
+            "scans_done_display",
+            "scans_required_display",
             "completed_at",
             "created_at",
         )
@@ -318,7 +411,25 @@ class PlacementTaskReadSerializer(serializers.ModelSerializer):
     def get_scans_done(self, obj: PlacementTask) -> int:
         if hasattr(obj, "_scans_done"):
             return int(obj._scans_done)
+        from django.db.models import Sum
+
+        from .product_units import product_stores_weight
+
+        if product_stores_weight(obj.product):
+            total = obj.scans.aggregate(total=Sum("weight_grams"))["total"]
+            return int(total or 0)
         return obj.scans.count()
+
+    def get_scans_done_display(self, obj: PlacementTask) -> str:
+        from .product_units import format_quantity
+
+        done = self.get_scans_done(obj)
+        return format_quantity(obj.product, done)
+
+    def get_scans_required_display(self, obj: PlacementTask) -> str:
+        from .product_units import format_quantity
+
+        return format_quantity(obj.product, int(obj.quantity))
 
     def get_batch_expiration(self, obj: PlacementTask):
         if obj.batch_id is None:
@@ -574,6 +685,8 @@ class PlanogramReadSerializer(serializers.ModelSerializer):
     stock_quantity = serializers.SerializerMethodField()
     current_qty = serializers.SerializerMethodField()
     max_capacity = serializers.SerializerMethodField()
+    target_quantity_kg = serializers.SerializerMethodField()
+    quantity_unit = serializers.SerializerMethodField()
 
     class Meta:
         model = Planogram
@@ -582,10 +695,24 @@ class PlanogramReadSerializer(serializers.ModelSerializer):
             "slot",
             "product",
             "target_quantity",
+            "target_quantity_kg",
+            "quantity_unit",
             "current_qty",
             "max_capacity",
             "stock_quantity",
         )
+
+    def get_target_quantity_kg(self, obj: Planogram):
+        from .product_units import grams_to_kg, product_stores_weight
+
+        if not product_stores_weight(obj.product):
+            return None
+        return str(grams_to_kg(int(obj.target_quantity or 0)))
+
+    def get_quantity_unit(self, obj: Planogram) -> str:
+        from .product_units import product_stores_weight
+
+        return "kg" if product_stores_weight(obj.product) else "piece"
 
     def get_current_qty(self, obj: Planogram) -> int:
         return int(obj.slot.current_qty or 0)
@@ -607,9 +734,19 @@ class PlanogramReadSerializer(serializers.ModelSerializer):
 
 
 class PlanogramWriteSerializer(serializers.ModelSerializer):
+    target_quantity_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        required=False,
+        write_only=True,
+    )
+
     class Meta:
         model = Planogram
-        fields = ("slot", "product", "target_quantity")
+        fields = ("slot", "product", "target_quantity", "target_quantity_kg")
+        extra_kwargs = {
+            "target_quantity": {"required": False},
+        }
 
     def validate_target_quantity(self, value: int) -> int:
         if value is not None and value < 1:
@@ -617,12 +754,91 @@ class PlanogramWriteSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        from .product_units import (
+            MAX_BOX_PLANOGRAM_TARGET_KG,
+            grams_to_kg,
+            kg_to_grams,
+            product_stores_weight,
+        )
+        from .spatial_engine import calculate_slot_max_capacity
+
         slot = attrs.get("slot") or (self.instance.slot if self.instance else None)
         product = attrs.get("product") or (self.instance.product if self.instance else None)
         target_quantity = attrs.get(
             "target_quantity",
             self.instance.target_quantity if self.instance else None,
         )
+        target_kg = attrs.pop("target_quantity_kg", None)
+        initial = getattr(self, "initial_data", None) or {}
+
+        if product is not None and product_stores_weight(product):
+            if "target_quantity" in initial and target_kg is None:
+                raise serializers.ValidationError(
+                    {
+                        "target_quantity": (
+                            "Для товаров на развес укажите target_quantity_kg (кг), "
+                            "не target_quantity."
+                        )
+                    }
+                )
+            if target_kg is not None:
+                grams = kg_to_grams(target_kg)
+                if grams < 1:
+                    raise serializers.ValidationError(
+                        {"target_quantity_kg": "Минимальный целевой вес — 0.001 кг."}
+                    )
+                phys_cap = (
+                    calculate_slot_max_capacity(slot, product) if slot is not None else 0
+                )
+                if phys_cap > 0:
+                    if grams > phys_cap:
+                        raise serializers.ValidationError(
+                            {
+                                "target_quantity_kg": (
+                                    f"Превышает физический максимум корзины "
+                                    f"({grams_to_kg(phys_cap)} кг)."
+                                )
+                            }
+                        )
+                elif grams > kg_to_grams(MAX_BOX_PLANOGRAM_TARGET_KG):
+                    raise serializers.ValidationError(
+                        {
+                            "target_quantity_kg": (
+                                f"Максимальный целевой вес в корзине — "
+                                f"{MAX_BOX_PLANOGRAM_TARGET_KG} кг "
+                                f"(задайте насыпную плотность в каталоге)."
+                            )
+                        }
+                    )
+                attrs["target_quantity"] = grams
+            elif self.instance is not None:
+                pass
+            else:
+                raise serializers.ValidationError(
+                    {"target_quantity_kg": "Укажите целевой вес в килограммах."}
+                )
+            if slot is not None:
+                equipment = (
+                    slot.equipment
+                    if hasattr(slot, "equipment") and slot.equipment_id
+                    else Equipment.objects.filter(pk=slot.equipment_id).first()
+                )
+                from .equipment_profiles import normalize_equipment_type
+
+                if equipment is not None and normalize_equipment_type(str(equipment.type)) != (
+                    Equipment.EquipmentType.BOX
+                ):
+                    raise serializers.ValidationError(
+                        "Товар на развес можно размещать только в корзине (BOX)."
+                    )
+        elif target_kg is not None:
+            raise serializers.ValidationError(
+                {"target_quantity_kg": "Поле доступно только для товаров на развес."}
+            )
+        elif "target_quantity" not in attrs and self.instance is None:
+            raise serializers.ValidationError(
+                {"target_quantity": "Укажите целевое количество."}
+            )
 
         if slot is not None and product is not None:
             equipment = (
@@ -652,9 +868,12 @@ class PlanogramWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     def _apply_capacity_defaults(self, planogram: Planogram) -> Planogram:
+        from .product_units import product_stores_weight
         from .spatial_engine import refresh_slot_max_capacity
 
         cap = refresh_slot_max_capacity(planogram.slot, planogram.product)
+        if product_stores_weight(planogram.product):
+            return planogram
         if int(planogram.target_quantity or 0) < 1 and cap > 0:
             planogram.target_quantity = cap
             planogram.save(update_fields=["target_quantity"])
@@ -807,9 +1026,46 @@ class ProductBatchSerializer(serializers.ModelSerializer):
 
 
 class SupplyOrderItemWriteSerializer(serializers.ModelSerializer):
+    quantity_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        required=False,
+        write_only=True,
+    )
+
     class Meta:
         model = SupplyOrderItem
-        fields = ("product", "quantity", "purchase_price")
+        fields = ("product", "quantity", "quantity_kg", "purchase_price")
+        extra_kwargs = {
+            "quantity": {"required": False},
+        }
+
+    def validate(self, attrs):
+        from .product_units import kg_to_grams, product_stores_weight
+
+        product = attrs.get("product")
+        quantity_kg = attrs.pop("quantity_kg", None)
+        if product is not None and product_stores_weight(product):
+            if quantity_kg is None and "quantity" not in attrs:
+                raise serializers.ValidationError(
+                    {"quantity_kg": "Укажите количество в килограммах."}
+                )
+            if quantity_kg is not None:
+                grams = kg_to_grams(quantity_kg)
+                if grams < 1:
+                    raise serializers.ValidationError(
+                        {"quantity_kg": "Минимальный заказ — 0.001 кг."}
+                    )
+                attrs["quantity"] = grams
+        elif quantity_kg is not None:
+            raise serializers.ValidationError(
+                {"quantity_kg": "Поле доступно только для товаров на развес."}
+            )
+        elif "quantity" not in attrs:
+            raise serializers.ValidationError(
+                {"quantity": "Укажите количество."}
+            )
+        return attrs
 
     def validate_quantity(self, value: int) -> int:
         if value < 1:
@@ -824,6 +1080,8 @@ class SupplyOrderItemWriteSerializer(serializers.ModelSerializer):
 
 class SupplyOrderItemReadSerializer(serializers.ModelSerializer):
     product_detail = ProductBriefSerializer(source="product", read_only=True)
+    quantity_kg = serializers.SerializerMethodField()
+    actual_quantity_kg = serializers.SerializerMethodField()
 
     class Meta:
         model = SupplyOrderItem
@@ -832,10 +1090,26 @@ class SupplyOrderItemReadSerializer(serializers.ModelSerializer):
             "product",
             "product_detail",
             "quantity",
+            "quantity_kg",
             "actual_quantity",
+            "actual_quantity_kg",
             "purchase_price",
             "discrepancy_note",
         )
+
+    def get_quantity_kg(self, obj: SupplyOrderItem):
+        from .product_units import grams_to_kg, product_stores_weight
+
+        if not product_stores_weight(obj.product):
+            return None
+        return str(grams_to_kg(int(obj.quantity or 0)))
+
+    def get_actual_quantity_kg(self, obj: SupplyOrderItem):
+        from .product_units import grams_to_kg, product_stores_weight
+
+        if not product_stores_weight(obj.product):
+            return None
+        return str(grams_to_kg(int(obj.actual_quantity or 0)))
 
 
 class ReceivingTaskBriefSerializer(serializers.ModelSerializer):
@@ -863,6 +1137,7 @@ class SupplyOrderListSerializer(serializers.ModelSerializer):
     supplier_detail = SupplierSerializer(source="supplier", read_only=True)
     store_name = serializers.CharField(source="store.name", read_only=True)
     created_by_username = serializers.SerializerMethodField()
+    cancelled_by_username = serializers.SerializerMethodField()
     receiving_task = ReceivingTaskBriefSerializer(read_only=True)
 
     class Meta:
@@ -884,6 +1159,11 @@ class SupplyOrderListSerializer(serializers.ModelSerializer):
             "created_by",
             "created_by_username",
             "received_by",
+            "cancellation_reason_code",
+            "cancellation_reason_note",
+            "cancelled_at",
+            "cancelled_by",
+            "cancelled_by_username",
             "receiving_task",
             "items",
         )
@@ -892,6 +1172,28 @@ class SupplyOrderListSerializer(serializers.ModelSerializer):
         if obj.created_by_id is None:
             return None
         return obj.created_by.username
+
+    def get_cancelled_by_username(self, obj: SupplyOrder) -> str | None:
+        if obj.cancelled_by_id is None:
+            return None
+        return obj.cancelled_by.username
+
+
+class SupplyOrderCancelSerializer(serializers.Serializer):
+    reason_code = serializers.ChoiceField(
+        choices=SupplyOrder.CancellationReason.choices,
+    )
+    reason_note = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        reason_code = attrs.get("reason_code")
+        reason_note = (attrs.get("reason_note") or "").strip()
+        if reason_code == SupplyOrder.CancellationReason.OTHER and not reason_note:
+            raise serializers.ValidationError(
+                {"reason_note": "Для причины «Другое» укажите комментарий."}
+            )
+        attrs["reason_note"] = reason_note
+        return attrs
 
 
 class SupplyOrderCreateSerializer(serializers.ModelSerializer):
@@ -945,9 +1247,13 @@ class SupplyOrderCreateSerializer(serializers.ModelSerializer):
                 {"detail": "Нет магазина в системе. Создайте магазин или привяжите store к пользователю."}
             )
 
+        from .product_units import order_line_amount
+
         total_amount = Decimal("0")
         for row in items_data:
-            total_amount += Decimal(row["quantity"]) * row["purchase_price"]
+            total_amount += order_line_amount(
+                row["product"], row["quantity"], row["purchase_price"]
+            )
 
         with transaction.atomic():
             order = SupplyOrder.objects.create(
@@ -973,11 +1279,23 @@ class SupplyOrderCreateSerializer(serializers.ModelSerializer):
 class ReceivingCompleteLineSerializer(serializers.Serializer):
     item_id = serializers.IntegerField()
     manufacture_date = serializers.DateField(required=False, allow_null=True)
-    actual_quantity = serializers.IntegerField(min_value=0)
+    actual_quantity = serializers.IntegerField(min_value=0, required=False)
+    actual_quantity_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        min_value=Decimal("0"),
+        required=False,
+    )
     discrepancy_note = serializers.CharField(required=False, allow_blank=True, default="")
+    unit_serials = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        required=False,
+        allow_empty=True,
+    )
 
     def validate(self, attrs):
         from .batch_expiry import product_tracks_expiry
+        from .product_units import kg_to_grams, product_stores_weight
 
         order_item = (
             SupplyOrderItem.objects.select_related("product")
@@ -986,10 +1304,32 @@ class ReceivingCompleteLineSerializer(serializers.Serializer):
         )
         if order_item is None:
             return attrs
-        actual = attrs["actual_quantity"]
-        if actual != order_item.quantity and not (attrs.get("discrepancy_note") or "").strip():
+
+        actual_kg = attrs.pop("actual_quantity_kg", None)
+        if product_stores_weight(order_item.product):
+            if actual_kg is not None:
+                attrs["actual_quantity"] = kg_to_grams(actual_kg)
+            elif attrs.get("actual_quantity") is None:
+                raise serializers.ValidationError(
+                    {"actual_quantity_kg": "Укажите фактический вес в килограммах."}
+                )
+        elif attrs.get("actual_quantity") is None:
             raise serializers.ValidationError(
-                {"discrepancy_note": "Обязательно при расхождении с заказанным количеством."}
+                {"actual_quantity": "Укажите фактическое количество."}
+            )
+
+        actual = int(attrs["actual_quantity"])
+        if actual != order_item.quantity and not (attrs.get("discrepancy_note") or "").strip():
+            from .product_units import format_quantity
+
+            ordered = format_quantity(order_item.product, order_item.quantity)
+            received = format_quantity(order_item.product, actual)
+            raise serializers.ValidationError(
+                {
+                    "discrepancy_note": (
+                        f"Обязательно при расхождении (заказано {ordered}, факт {received})."
+                    )
+                }
             )
         product = order_item.product
         manufacture_date = attrs.get("manufacture_date")
@@ -1060,9 +1400,13 @@ class SupplyOrderUpdateSerializer(serializers.ModelSerializer):
             if "planned_receiving_date" in validated_data:
                 instance.planned_receiving_date = validated_data["planned_receiving_date"]
             if items_data is not None:
+                from .product_units import order_line_amount
+
                 total_amount = Decimal("0")
                 for row in items_data:
-                    total_amount += Decimal(row["quantity"]) * row["purchase_price"]
+                    total_amount += order_line_amount(
+                        row["product"], row["quantity"], row["purchase_price"]
+                    )
                 instance.total_amount = total_amount
                 instance.items.all().delete()
                 for row in items_data:
@@ -1318,10 +1662,20 @@ class ChatMessageCreateSerializer(serializers.Serializer):
 
 
 class ScanRawCodeSerializer(serializers.Serializer):
-    raw_code = serializers.CharField(max_length=4000)
+    raw_code = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+    weight_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        required=False,
+        min_value=Decimal("0.001"),
+    )
 
-    def validate_raw_code(self, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Передайте raw_code со сканера.")
-        return value
+    def validate(self, attrs):
+        raw_code = (attrs.get("raw_code") or "").strip()
+        weight_kg = attrs.get("weight_kg")
+        if not raw_code and weight_kg is None:
+            raise serializers.ValidationError(
+                "Передайте raw_code со сканера или weight_kg."
+            )
+        attrs["raw_code"] = raw_code
+        return attrs

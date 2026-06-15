@@ -10,6 +10,19 @@ LayoutMode = str  # grid | linear | single | expo_vertical
 
 MANNEQUIN_ZONE_LABELS = ("Верх", "Низ", "Аксессуар")
 
+# Корзина (BOX): на карте width × height — это основание (см), не объёмный параллелепипед.
+BOX_MIN_FILL_HEIGHT_CM = 15.0
+BOX_MAX_FILL_HEIGHT_CM = 40.0
+BOX_FILL_HEIGHT_RATIO = 0.35
+
+
+def box_naval_fill_height_cm(equipment: Equipment) -> float:
+    """Высота насыпного слоя в корзине (см), по меньшей стороне основания."""
+    w = float(equipment.width or 100)
+    d = float(equipment.height or 60)
+    from_min_side = min(w, d) * BOX_FILL_HEIGHT_RATIO
+    return max(BOX_MIN_FILL_HEIGHT_CM, min(from_min_side, BOX_MAX_FILL_HEIGHT_CM))
+
 
 @dataclass(frozen=True)
 class SlotSpec:
@@ -203,7 +216,12 @@ def shelf_dimensions_for_equipment(equipment: Equipment, level: int) -> dict:
     if profile.layout_mode == "linear":
         return {"width": w, "height": 8.0, "depth": d}
     if profile.layout_mode == "single":
-        return {"width": w, "height": float(equipment.width or 60), "depth": d}
+        # BOX / паллета: width × equipment.height — footprint; height — глубина насыпа.
+        return {
+            "width": w,
+            "height": box_naval_fill_height_cm(equipment),
+            "depth": d,
+        }
     if profile.layout_mode == "expo_vertical":
         return {"width": w, "height": d / 3, "depth": d}
 

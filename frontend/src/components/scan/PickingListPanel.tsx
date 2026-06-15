@@ -11,11 +11,14 @@ type PickingGroup = {
     sku: string;
     gtin: string | null;
     is_marked: boolean;
+    sale_unit?: 'piece' | 'weight';
   };
   total_qty: number;
+  total_qty_display?: string;
   tasks: Array<{
     id: number;
     quantity: number;
+    quantity_display?: string;
     destination: string;
     batch_expiration: string | null;
   }>;
@@ -79,7 +82,9 @@ export function PickingListPanel(): React.ReactElement {
             className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3"
           >
             <div className="font-medium text-slate-100">{g.product.name}</div>
-            <div className="mt-1 text-sm text-emerald-200">Всего: {g.total_qty} шт.</div>
+            <div className="mt-1 text-sm text-emerald-200">
+              Всего: {g.total_qty_display ?? `${g.total_qty} шт.`}
+            </div>
             {g.product.gtin ? (
               <div className="text-xs text-slate-500">GTIN: {g.product.gtin}</div>
             ) : (
@@ -88,7 +93,7 @@ export function PickingListPanel(): React.ReactElement {
             <ul className="mt-2 space-y-1 text-xs text-slate-400">
               {g.tasks.map((t) => (
                 <li key={t.id}>
-                  {t.quantity} шт. → {t.destination}
+                  {t.quantity_display ?? `${t.quantity} шт.`} → {t.destination}
                   {t.batch_expiration ? ` (до ${t.batch_expiration})` : ''}
                 </li>
               ))}
